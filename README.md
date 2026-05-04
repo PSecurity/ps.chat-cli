@@ -1,8 +1,3 @@
-Abaixo está o README.md completo e profissional para o repositório ps.chat-client, com instruções claras, badges e foco na facilidade de uso para o usuário final.
-
-📄 README.md para o ps.chat-client repo
-
-```markdown
 # 👾 PS.Chat Client
 
 [![Version](https://img.shields.io/badge/version-1.0.0-blue.svg)](https://github.com/seu-usuario/ps.chat-client/releases)
@@ -12,7 +7,7 @@ Abaixo está o README.md completo e profissional para o repositório ps.chat-cli
 
 **Cliente leve para acessar salas do PS.Chat** – sem necessidade de instalar servidor ou dependências complexas.
 
-![PS.Chat Client Demo](https://via.placeholder.com/800x200?text=PS.Chat+Client+em+a%C3%A7%C3%A3o)
+[![PS.Chat Client Demo](https://placehold.co/800x200/0a0014/b026ff?text=PS.Chat+Client)](https://tempimg.cc/800x200?bg=0a0014&color=ff00ff&text=PS.Chat-Cli)
 
 ---
 
@@ -20,7 +15,7 @@ Abaixo está o README.md completo e profissional para o repositório ps.chat-cli
 
 Este repositório contém **scripts clientes** para se conectar a um servidor [PS.Chat Admin](https://github.com/seu-usuario/ps.chat-admin) já em execução.
 
-Você só precisa:
+**Você só precisa:**
 1. Saber o **IP do servidor** (quem está rodando o admin)
 2. Ter o **token da sala** (fornecido pelo administrador)
 
@@ -52,7 +47,7 @@ O script irá:
 · Perguntar IP do servidor e token
 · Abrir o navegador automaticamente na sala
 
-Opção 2: Cliente Python (Linux/macOS/Windows/Termux)
+**Opção 2:** Cliente Python (Linux/macOS/Windows/Termux)
 
 ```bash
 # Clone o repositório
@@ -66,7 +61,7 @@ pip install zeroconf
 python ps.chat-cli.py
 ```
 
-Opção 3: Cliente bash (qualquer sistema com bash)
+**Opção 3:** Cliente bash (qualquer sistema com bash)
 
 ```bash
 # Baixe o script
@@ -79,7 +74,7 @@ chmod +x ps.chat-lite.sh
 
 ---
 
-📖 Como usar (qualquer opção)
+## 📖 Como usar (qualquer opção)
 
 1. Execute o cliente escolhido
 2. Digite o IP do servidor (ex: 192.168.0.100 – veja no terminal do admin)
@@ -87,7 +82,7 @@ chmod +x ps.chat-lite.sh
 4. O navegador será aberto automaticamente na sala de chat
 5. Escolha um nome e comece a conversar!
 
-Exemplo de sessão
+**Exemplo de sessão**
 
 ```
 ========================================
@@ -103,7 +98,7 @@ Exemplo de sessão
 
 ---
 
-🔍 Descoberta automática (mDNS)
+## 🔍 Descoberta automática (mDNS)
 
 O cliente Python (ps.chat-cli.py) tenta encontrar o servidor automaticamente na rede local usando mDNS (ZeroConf).
 
@@ -116,9 +111,9 @@ Para que a descoberta funcione:
 
 ---
 
-📱 No Termux (Android)
+## 📱 No Termux (Android)
 
-Instalação rápida (recomendado)
+**Instalação rápida (recomendado)**
 
 ```bash
 pkg update && pkg upgrade
@@ -129,7 +124,7 @@ pip install zeroconf
 python ps.chat-cli.py
 ```
 
-Executar sem instalar Python (bash puro)
+**Executar sem instalar Python (bash puro)**
 
 ```bash
 pkg install bash
@@ -139,7 +134,7 @@ bash ps.chat-lite.sh
 
 ---
 
-🐛 Troubleshooting
+## 🐛 Troubleshooting
 
 Problema Solução
 termux-open-url: command not found Instale termux-api: pkg install termux-api
@@ -150,7 +145,7 @@ Navegador não abre No Termux, execute termux-open-url http://... manualmente pa
 
 ---
 
-📋 Estrutura do repositório
+## 📋 Estrutura do repositório
 
 ```
 ps.chat-client/
@@ -163,7 +158,7 @@ ps.chat-client/
 
 ---
 
-🔗 Links úteis
+## 🔗 Links úteis
 
 · Repositório do servidor (admin)
 · Documentação completa
@@ -171,7 +166,7 @@ ps.chat-client/
 
 ---
 
-🤝 Contribuindo
+## 🤝 Contribuindo
 
 1. Faça um fork do projeto
 2. Crie uma branch (git checkout -b feature/nova-feature)
@@ -181,7 +176,7 @@ ps.chat-client/
 
 ---
 
-📄 Licença
+## 📄 Licença
 
 Distribuído sob a licença MIT. Veja LICENSE para mais informações.
 
@@ -189,7 +184,7 @@ Distribuído sob a licença MIT. Veja LICENSE para mais informações.
 
 Desenvolvido por PeekSecurity – Acesso rápido e simples.
 
-```
+---
 
 ---
 
@@ -212,5 +207,3 @@ git push -u origin main
 git tag -a v1.0.0 -m "Primeira versão estável do cliente"
 git push origin v1.0.0
 ```
-
-Após subir, cole os links dos dois repositórios para eu verificar. Depois retomamos a versão 2.0 com criptografia, arquivos, sons e temas! 🚀
