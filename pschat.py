@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """
 PS.Chat CLI — Cliente terminal seguro com E2EE + Assinatura
+Comandos: /sala, /help, /clear, /sair
 """
 
 import sys, os, time, threading, subprocess, json, base64, hashlib
 from datetime import datetime
 
+# ========== Instalação automática de dependências ==========
 def ensure_dependencies():
     deps = {
         "socketio": "python-socketio[client]",
@@ -23,7 +25,11 @@ def ensure_dependencies():
         ok = input("Instalar agora? [S/n]: ").strip().lower()
         if ok in ('', 's', 'sim', 'yes'):
             for pkg in missing:
-                subprocess.check_call([sys.executable, "-m", "pip", "install", pkg])
+                try:
+                    subprocess.check_call([sys.executable, "-m", "pip", "install", pkg])
+                except subprocess.CalledProcessError:
+                    print(f"Falha ao instalar {pkg}. Tente manualmente.")
+                    sys.exit(1)
             print("✅ Instalação concluída. Reiniciando...\n")
             os.execv(sys.executable, [sys.executable] + sys.argv)
         else:
@@ -63,6 +69,7 @@ def log(msg, level='info'):
     pre = {'info': D+"[●]"+R, 'ok': G+"[✔]"+R, 'warn': D+"[!]"+R, 'err': E+"[✘]"+R}
     print(pre.get(level, D+"[ ]"+R) + " " + msg)
 
+# ========== Gerenciamento de chaves ==========
 def load_or_create_keys():
     if os.path.exists(KEY_FILE):
         with open(KEY_FILE) as f:
@@ -105,6 +112,7 @@ def load_or_create_keys():
     except: pass
     return priv, pub, sign_priv, sign_pub
 
+# ========== Criptografia ==========
 def encrypt_message(plaintext: str, recipient_pub_pem: str, sender_priv: X25519PrivateKey, sign_priv: Ed25519PrivateKey) -> dict:
     recipient_pub = serialization.load_pem_public_key(base64.b64decode(recipient_pub_pem))
     shared_key = sender_priv.exchange(recipient_pub)
@@ -112,7 +120,6 @@ def encrypt_message(plaintext: str, recipient_pub_pem: str, sender_priv: X25519P
     aesgcm = AESGCM(derived_key)
     nonce = os.urandom(12)
     ciphertext = aesgcm.encrypt(nonce, plaintext.encode(), None)
-    # Assinar o ciphertext (ou plaintext? assinar o ciphertext garante integridade do conteúdo encriptado)
     signature = sign_priv.sign(ciphertext)
     return {
         'nonce': base64.b64encode(nonce).decode(),
@@ -122,7 +129,6 @@ def encrypt_message(plaintext: str, recipient_pub_pem: str, sender_priv: X25519P
     }
 
 def decrypt_message(encrypted: dict, sender_pub_pem: str, sender_sign_pub_pem: str, recipient_priv: X25519PrivateKey) -> str:
-    # Verificar assinatura
     sender_sign_pub = serialization.load_pem_public_key(base64.b64decode(sender_sign_pub_pem))
     ciphertext = base64.b64decode(encrypted['ciphertext'])
     signature = base64.b64decode(encrypted['signature'])
@@ -139,7 +145,7 @@ def decrypt_message(encrypted: dict, sender_pub_pem: str, sender_sign_pub_pem: s
     plaintext = aesgcm.decrypt(nonce, ciphertext, None)
     return plaintext.decode()
 
-# Descoberta mDNS
+# ========== Descoberta mDNS ==========
 class PSChatListener:
     def __init__(self): self.hosts = []
     def add_service(self, zc, type_, name):
@@ -161,6 +167,7 @@ def discover(timeout=4):
         log(f"Falha mDNS: {e}", "warn")
     return listener.hosts
 
+# ========== Função principal ==========
 def main():
     banner()
     priv, pub, sign_priv, sign_pub = load_or_create_keys()
@@ -190,13 +197,14 @@ def main():
     token = ""
     username = ""
 
+    # ========== Handlers de eventos ==========
     @sio.event
     def connect():
         nonlocal token, username
         log("Conectado!", "ok")
         token = input(N + "Token da sala: " + R).strip()
         username = input(N + "Seu nome: " + R).strip() or "Anônimo"
-        # Envia chaves públicas (criptografia e assinatura)
+        # Envia chaves públicas ao entrar
         sio.emit('entrar', {
             'token': token,
             'username': username,
@@ -204,30 +212,35 @@ def main():
             'sign_pubkey': sign_pub_pem
         })
 
+    @sio.on('chave_publica')
+    def on_chave_publica(data):
+        if data.get('user') == username:
+            return
+        peers[data['user']] = {
+            'pubkey': data['pubkey'],
+            'sign_pubkey': data['sign_pubkey']
+        }
+        log(f"Chave de {data['user']} armazenada.", "ok")
+
     @sio.on('mensagem')
     def on_msg(data):
         if data.get('user') == username:
             return
-        # Atualizar chaves se for anúncio
-        if 'pubkey' in data and 'sign_pubkey' in data:
-            peers[data['user']] = {
-                'pubkey': data['pubkey'],
-                'sign_pubkey': data['sign_pubkey']
-            }
-            log(f"Chaves de {data['user']} atualizadas.", "ok")
-            return
-        # Mensagem criptografada
+        # Mensagens criptografadas
         if 'ciphertext' in data and 'signature' in data:
             peer_info = peers.get(data['user'])
             if not peer_info:
-                log(f"Chave de {data['user']} não disponível.", "err")
+                log(f"Chave de {data['user']} não disponível. Mensagem ignorada.", "err")
                 return
             try:
                 plain = decrypt_message(data, peer_info['pubkey'], peer_info['sign_pubkey'], priv)
-                print(N + f"\n▸ {data['user']} (seguro): {plain}" + R)
+                print(N + f"\n▸ {data['user']} (🔒 seguro): {plain}" + R)
             except ValueError as e:
                 log(f"Falha de segurança: {e}", "err")
                 return
+        # Mensagens de sistema ou texto plano
+        elif data.get('type') == 'system':
+            print(D + f"\n  {data['text']}" + R)
         else:
             print(D + f"\n▸ {data['user']}: {data.get('text','')}" + R)
         sys.stdout.write(P + ">>> " + R)
@@ -253,12 +266,14 @@ def main():
         log("Conexão encerrada.", "err")
         alive = False
 
+    # Conectar
     try:
         sio.connect(url, wait_timeout=15)
     except Exception as e:
         log(f"Falha ao conectar: {e}", "err")
         sys.exit(1)
 
+    # ========== Thread de input ==========
     def input_loop():
         nonlocal alive
         while alive:
@@ -267,6 +282,10 @@ def main():
             except (EOFError, KeyboardInterrupt):
                 alive = False
                 break
+
+            if not msg:
+                continue
+            # Comandos especiais
             if msg.lower() == '/sair':
                 alive = False
                 sio.disconnect()
@@ -276,7 +295,27 @@ def main():
                     sio.emit('sala_info', {'token': token})
                 else:
                     log("Você ainda não entrou em uma sala.", "warn")
+            elif msg.lower() == '/clear':
+                os.system('clear' if os.name != 'nt' else 'cls')
+                banner()
+            elif msg.lower() == '/help':
+                print(N + """
+╔══════════════════════════════════════╗
+║ Comandos:                           ║
+║  /sala   - Listar participantes     ║
+║  /clear  - Limpar a tela            ║
+║  /help   - Mostrar esta ajuda       ║
+║  /sair   - Sair da sala             ║
+║                                     ║
+║ Digite a mensagem e Enter para      ║
+║ enviar criptografada (se houver     ║
+║ chave) ou em texto plano.           ║
+╚══════════════════════════════════════╝
+""" + R)
+                sys.stdout.write(P + ">>> " + R)
+                sys.stdout.flush()
             elif msg and token:
+                # Envia mensagem (criptografada se possível)
                 if peers:
                     for peer, info in peers.items():
                         enc = encrypt_message(msg, info['pubkey'], priv, sign_priv)
@@ -286,6 +325,7 @@ def main():
                             **enc
                         })
                 else:
+                    # Fallback texto plano
                     sio.emit('mensagem', {
                         'token': token,
                         'text': msg,
