@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-PS.Chat CLI v2.2.1 – E2EE, DM, ban, verify, device_id, chave de sala robusta
+PS.Chat CLI v2.2.2 – E2EE + chave de sala automática (qualquer membro pode iniciar)
 """
 
 import sys, os, time, threading, subprocess, json, base64, hashlib, random, string, uuid, readline
 from datetime import datetime
 
+# ---------- Auto-instalação de dependências ----------
 def ensure_dependencies():
     deps = {"socketio": "python-socketio[client]", "zeroconf": "zeroconf", "cryptography": "cryptography"}
     missing = []
@@ -35,7 +36,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.exceptions import InvalidSignature, InvalidTag
 
-# ---------- Cores ----------
+# ---------- Cores ANSI ----------
 R = "\033[0m"
 B = "\033[1m"
 P = "\033[38;5;135m"
@@ -47,18 +48,21 @@ Y = "\033[38;5;228m"
 M = "\033[38;5;141m"
 C = "\033[38;5;51m"
 
+# ---------- Diretórios de dados ----------
 CONFIG_DIR = os.path.expanduser("~/.pschat")
 KEY_FILE = os.path.join(CONFIG_DIR, "keys.json")
 DEVICE_ID_FILE = os.path.join(CONFIG_DIR, "device_id")
 HISTORY_DIR = os.path.join(CONFIG_DIR, "history")
 DOWNLOAD_DIR = os.path.expanduser("~/Downloads/pschat")
 
+# ---------- Banner ----------
 def banner():
     print(P + r"""  ╔══════════════════════════════╗
   ║  PS.CHAT CLI  ▸ PeekSecurity║
   ╚══════════════════════════════╝
 """ + R)
 
+# ---------- Utilitários ----------
 def log(msg, level='info'):
     pre = {'info': D+"[●]"+R, 'ok': G+"[✔]"+R, 'warn': D+"[!]"+R, 'err': E+"[✘]"+R}
     print(pre.get(level, D+"[ ]"+R) + " " + msg)
@@ -78,7 +82,7 @@ def get_device_id():
         f.write(did)
     return did
 
-# ---- Cripto ----
+# ---------- Funções criptográficas ----------
 def generate_ephemeral_keys():
     priv = X25519PrivateKey.generate()
     sign_priv = Ed25519PrivateKey.generate()
@@ -101,24 +105,16 @@ def load_or_create_keys(anonymous=False):
     sign_priv = Ed25519PrivateKey.generate()
     sign_pub = sign_priv.public_key()
     data = {
-        'private': base64.b64encode(
-            priv.private_bytes(encoding=serialization.Encoding.PEM,
-                               format=serialization.PrivateFormat.PKCS8,
-                               encryption_algorithm=serialization.NoEncryption())
-        ).decode(),
-        'public': base64.b64encode(
-            pub.public_bytes(encoding=serialization.Encoding.PEM,
-                             format=serialization.PublicFormat.SubjectPublicKeyInfo)
-        ).decode(),
-        'sign_private': base64.b64encode(
-            sign_priv.private_bytes(encoding=serialization.Encoding.PEM,
-                                    format=serialization.PrivateFormat.PKCS8,
-                                    encryption_algorithm=serialization.NoEncryption())
-        ).decode(),
-        'sign_public': base64.b64encode(
-            sign_pub.public_bytes(encoding=serialization.Encoding.PEM,
-                                  format=serialization.PublicFormat.SubjectPublicKeyInfo)
-        ).decode()
+        'private': base64.b64encode(priv.private_bytes(encoding=serialization.Encoding.PEM,
+                                                       format=serialization.PrivateFormat.PKCS8,
+                                                       encryption_algorithm=serialization.NoEncryption())).decode(),
+        'public': base64.b64encode(pub.public_bytes(encoding=serialization.Encoding.PEM,
+                                                    format=serialization.PublicFormat.SubjectPublicKeyInfo)).decode(),
+        'sign_private': base64.b64encode(sign_priv.private_bytes(encoding=serialization.Encoding.PEM,
+                                                                 format=serialization.PrivateFormat.PKCS8,
+                                                                 encryption_algorithm=serialization.NoEncryption())).decode(),
+        'sign_public': base64.b64encode(sign_pub.public_bytes(encoding=serialization.Encoding.PEM,
+                                                              format=serialization.PublicFormat.SubjectPublicKeyInfo)).decode()
     }
     with open(KEY_FILE, 'w') as f: json.dump(data, f, indent=2)
     os.chmod(KEY_FILE, 0o600)
@@ -132,12 +128,10 @@ def encrypt_for_peer(plaintext, recipient_pub_pem, sender_priv, sign_priv):
     nonce = os.urandom(12)
     ciphertext = aesgcm.encrypt(nonce, plaintext.encode(), None)
     signature = sign_priv.sign(ciphertext)
-    return {
-        'nonce': base64.b64encode(nonce).decode(),
-        'ciphertext': base64.b64encode(ciphertext).decode(),
-        'signature': base64.b64encode(signature).decode(),
-        'recipient_pub': recipient_pub_pem
-    }
+    return {'nonce': base64.b64encode(nonce).decode(),
+            'ciphertext': base64.b64encode(ciphertext).decode(),
+            'signature': base64.b64encode(signature).decode(),
+            'recipient_pub': recipient_pub_pem}
 
 def decrypt_from_peer(encrypted, sender_pub_pem, sender_sign_pub_pem, recipient_priv):
     sender_sign_pub = serialization.load_pem_public_key(base64.b64decode(sender_sign_pub_pem))
@@ -156,12 +150,10 @@ def encrypt_room_message(plaintext, room_key, sign_priv):
     nonce = os.urandom(12)
     ciphertext = aesgcm.encrypt(nonce, plaintext.encode(), None)
     signature = sign_priv.sign(ciphertext)
-    return {
-        'nonce': base64.b64encode(nonce).decode(),
-        'ciphertext': base64.b64encode(ciphertext).decode(),
-        'signature': base64.b64encode(signature).decode(),
-        'room_encrypted': True
-    }
+    return {'nonce': base64.b64encode(nonce).decode(),
+            'ciphertext': base64.b64encode(ciphertext).decode(),
+            'signature': base64.b64encode(signature).decode(),
+            'room_encrypted': True}
 
 def decrypt_room_message(encrypted, room_key, sender_sign_pub_pem):
     sender_sign_pub = serialization.load_pem_public_key(base64.b64decode(sender_sign_pub_pem))
@@ -172,19 +164,18 @@ def decrypt_room_message(encrypted, room_key, sender_sign_pub_pem):
     nonce = base64.b64decode(encrypted['nonce'])
     return aesgcm.decrypt(nonce, ciphertext, None).decode()
 
-# ---------- Autocompletar ----------
+# ---------- Autocompletar comandos ----------
 COMMANDS = ['/sair', '/sala', '/sumir', '/send', '/log', '/export', '/fingerprint',
             '/kick', '/mute', '/unmute', '/ban', '/unban', '/verify', '/dm',
             '/filter', '/clear', '/help']
 def completer(text, state):
     options = [cmd for cmd in COMMANDS if cmd.startswith(text)]
-    if state < len(options):
-        return options[state]
+    if state < len(options): return options[state]
     return None
 readline.set_completer(completer)
 readline.parse_and_bind("tab: complete")
 
-# ---------- mDNS ----------
+# ---------- Descoberta mDNS ----------
 class PSListener:
     def __init__(self): self.hosts = []
     def add_service(self, zc, type_, name):
@@ -204,7 +195,7 @@ def discover(timeout=4):
     except: pass
     return listener.hosts
 
-# ---------- Cliente ----------
+# ========== CLASSE PRINCIPAL ==========
 class ChatClient:
     def __init__(self):
         self.sio = socketio.Client()
@@ -225,6 +216,7 @@ class ChatClient:
         self.device_id = get_device_id()
         self._register_handlers()
 
+    # ---------- Registro de eventos Socket.IO ----------
     def _register_handlers(self):
         sio = self.sio
 
@@ -232,54 +224,45 @@ class ChatClient:
         def connect(): pass
 
         @sio.on('admin_auth')
-        def _(data):
+        def _auth(data):
             if data.get('status') == 'ok':
                 self.is_admin = True
                 print(Y + "👑 Admin autenticado." + R)
-                # Se for admin e ainda não tiver chave, gerar após um curto delay
-                if not self.room_key:
-                    threading.Timer(2.0, self._maybe_generate_room_key).start()
 
         @sio.on('promoted')
-        def _(data):
+        def _promoted(data):
             self.is_moderator = True
             log("Você foi promovido a moderador.", "ok")
 
         @sio.on('demoted')
-        def _(data):
+        def _demoted(data):
             self.is_moderator = False
             log("Você foi rebaixado.", "warn")
 
         @sio.on('muted')
-        def _(data):
+        def _muted(data):
             self.muted = True
             log("Você foi silenciado.", "warn")
 
         @sio.on('unmuted')
-        def _(data):
+        def _unmuted(data):
             self.muted = False
             log("Silêncio removido.", "ok")
 
         @sio.on('rotate_key')
-        def _(data):
-            if self.is_admin and self.room_key:
+        def _rotate(data):
+            if (self.is_admin or self.is_moderator) and self.room_key:
                 self.room_key = os.urandom(32)
                 log("Rotação de chave de sala.", "ok")
                 for peer in self.peers:
                     self._send_room_key_to(peer)
-            elif self.is_moderator and self.room_key:
-                # Moderador também pode rotacionar se não houver admin
-                self.room_key = os.urandom(32)
-                log("Moderador rotacionou a chave de sala.", "ok")
-                for peer in self.peers:
-                    self._send_room_key_to(peer)
 
         @sio.on('erro')
-        def _(data):
+        def _err(data):
             log(data.get('mensagem', 'Erro'), "err")
 
         @sio.on('chave_publica')
-        def _(data):
+        def _pubkey(data):
             if data['user'] == self.username: return
             self.peers[data['user']] = {'pubkey': data['pubkey'], 'sign_pubkey': data['sign_pubkey']}
             log(f"Chave de {data['user']} armazenada.", "ok")
@@ -287,7 +270,7 @@ class ChatClient:
                 self._send_room_key_to(data['user'])
 
         @sio.on('room_key')
-        def _(data):
+        def _rkey(data):
             if data.get('user') == self.username: return
             if data['user'] not in self.peers: return
             try:
@@ -302,18 +285,17 @@ class ChatClient:
                 log(f"Falha room key: {e}", "err")
 
         @sio.on('verify_request')
-        def _(data):
+        def _vreq(data):
             nonce = base64.b64decode(data['nonce'])
             signature = self.sign_priv.sign(nonce)
-            resp = {
+            self.sio.emit('verify_response', {
                 'token': self.token, 'requester': data['requester'],
                 'nonce': data['nonce'],
                 'signature': base64.b64encode(signature).decode()
-            }
-            self.sio.emit('verify_response', resp)
+            })
 
         @sio.on('verify_response')
-        def _(data):
+        def _vres(data):
             nonce = base64.b64decode(data['nonce'])
             signature = base64.b64decode(data['signature'])
             peer = self.peers.get(data['requester'])
@@ -325,9 +307,10 @@ class ChatClient:
                     print(E + "❌ Assinatura inválida!" + R)
 
         @sio.on('mensagem')
-        def _(data):
+        def _msg(data):
             if data.get('user') == self.username: return
-            timestamp = datetime.now().strftime("[%H:%M]")
+            ts = datetime.now().strftime("[%H:%M]")
+
             # DM criptografada
             if 'dm_target' in data or ('ciphertext' in data and not data.get('room_encrypted')):
                 peer = self.peers.get(data['user'])
@@ -336,7 +319,7 @@ class ChatClient:
                         txt = decrypt_from_peer(
                             {'nonce': data['nonce'], 'ciphertext': data['ciphertext'], 'signature': data['signature']},
                             peer['pubkey'], peer['sign_pubkey'], self.priv)
-                        print(C + f"📩 [DM] {timestamp} {data['user']}: {txt}" + R)
+                        print(C + f"📩 [DM] {ts} {data['user']}: {txt}" + R)
                     except:
                         log("Falha ao decifrar DM.", "err")
                 return
@@ -359,22 +342,22 @@ class ChatClient:
                         {'nonce': data['nonce'], 'ciphertext': data['ciphertext'], 'signature': data['signature']},
                         self.room_key, self.peers[data['user']]['sign_pubkey'])
                 except: return
-            if self.current_filter and not txt.startswith(f"#{self.current_filter}"):
-                return
+            if self.current_filter and not txt.startswith(f"#{self.current_filter}"): return
+
             # Menção
             if f"@{self.username}" in txt:
-                print("\a" + C + B + f"💬 {timestamp} {data['user']}: {txt}" + R)
+                print("\a" + C + B + f"💬 {ts} {data['user']}: {txt}" + R)
             else:
                 admin_icon = Y+"👑 " if data.get('admin') else ""
                 mod_icon = M+"🛡️ " if data.get('moderator') else ""
                 user_color = Y if data.get('admin') else (M if data.get('moderator') else N)
                 prefix = "🔒 seguro" if data.get('room_encrypted') else "📝"
                 if data.get('ephemeral'): prefix = "⚡ efêmero"
-                print(f"{timestamp} {user_color}{admin_icon}{mod_icon}{data['user']}{R} ({prefix}): {txt}")
+                print(f"{ts} {user_color}{admin_icon}{mod_icon}{data['user']}{R} ({prefix}): {txt}")
             if self.logging_active: self.log_messages.append(f"{data['user']}: {txt}")
 
         @sio.on('sala_info')
-        def _(data):
+        def _sala(data):
             print(N + "\n👥 Participantes:" + R)
             for m in data.get('members', []):
                 admin_icon = Y+"👑 " if m.get('admin') else ""
@@ -385,7 +368,7 @@ class ChatClient:
             sys.stdout.write(P + ">>> " + R); sys.stdout.flush()
 
         @sio.on('kick')
-        def _(data):
+        def _kick(data):
             log(data.get('mensagem', 'Você foi removido.'), "err")
             self.alive = False
             self.sio.disconnect()
@@ -395,6 +378,7 @@ class ChatClient:
             self.alive = False
             log("Conexão encerrada.", "err")
 
+    # ---------- Envio de chave de sala ----------
     def _send_room_key_to(self, dest):
         if not self.room_key: return
         peer = self.peers.get(dest)
@@ -406,37 +390,29 @@ class ChatClient:
             'admin': self.is_admin
         })
 
-    def _maybe_generate_room_key(self):
-        if not self.room_key and self.is_admin:
-            self.generate_and_distribute_room_key()
-
     def generate_and_distribute_room_key(self):
         self.room_key = os.urandom(32)
         log("Nova chave de sala gerada.", "ok")
         for peer in self.peers:
             self._send_room_key_to(peer)
 
+    # ========== EXECUÇÃO PRINCIPAL ==========
     def run(self):
-        print(P + B + r"""  ╔══════════════════════════════╗
-  ║  PS.CHAT CLI  ▸ PeekSecurity║
-  ╚══════════════════════════════╝
-""" + R)
+        banner()
 
+        # Modo anônimo
         anon = input(N + "Entrar como anônimo? [s/N]: " + R).strip().lower()
         anonymous = anon == 's'
         self.priv, self.pub, self.sign_priv, self.sign_pub = load_or_create_keys(anonymous)
-        self.pub_pem = base64.b64encode(
-            self.pub.public_bytes(encoding=serialization.Encoding.PEM,
-                                  format=serialization.PublicFormat.SubjectPublicKeyInfo)
-        ).decode()
-        self.sign_pub_pem = base64.b64encode(
-            self.sign_pub.public_bytes(encoding=serialization.Encoding.PEM,
-                                       format=serialization.PublicFormat.SubjectPublicKeyInfo)
-        ).decode()
+        self.pub_pem = base64.b64encode(self.pub.public_bytes(encoding=serialization.Encoding.PEM,
+                                                               format=serialization.PublicFormat.SubjectPublicKeyInfo)).decode()
+        self.sign_pub_pem = base64.b64encode(self.sign_pub.public_bytes(encoding=serialization.Encoding.PEM,
+                                                                         format=serialization.PublicFormat.SubjectPublicKeyInfo)).decode()
 
         if not anonymous:
             print(Y + f"🔑 Fingerprint: {fingerprint(self.pub_pem)}" + R)
 
+        # Conexão
         hosts = discover()
         if hosts:
             ip, port = hosts[0]
@@ -451,6 +427,7 @@ class ChatClient:
             log(f"Falha ao conectar: {e}", "err")
             sys.exit(1)
 
+        # Credenciais
         self.token = input(N + "Token da sala: " + R).strip()
         if anonymous:
             self.username = 'Anon_' + ''.join(random.choices(string.ascii_letters + string.digits, k=6))
@@ -471,15 +448,15 @@ class ChatClient:
             'device_id': self.device_id
         })
 
-        # Aguardar um pouco para que a chave chegue via admin ou outro membro
-        time.sleep(2)
-        if not self.room_key and not self.is_admin:
-            log("Aguardando chave de sala... (pode levar alguns segundos)", "warn")
-            for _ in range(5):
-                time.sleep(1)
-                if self.room_key:
-                    break
+        # Aguardar chave de sala (admin gera primeiro; qualquer membro gera após 5s)
+        def generate_if_no_key():
+            time.sleep(5)
+            if not self.room_key:
+                self.generate_and_distribute_room_key()
 
+        threading.Thread(target=generate_if_no_key, daemon=True).start()
+
+        # ---------- Loop de entrada ----------
         def input_loop():
             while self.alive:
                 try:
@@ -488,16 +465,16 @@ class ChatClient:
                 if not raw: continue
                 if self.muted and not raw.startswith('/'):
                     log("Silenciado.", "warn"); continue
-                cmd = raw.lower().split()[0] if raw.startswith('/') else None
+
                 if raw == '/sair':
                     self.alive = False; self.sio.disconnect(); break
                 elif raw == '/sala':
                     self.sio.emit('sala_info', {'token': self.token})
                 elif raw == '/clear':
                     os.system('clear' if os.name != 'nt' else 'cls')
-                    print(banner())
+                    banner()
                 elif raw == '/help':
-                    print(N + "  /sala /sumir /send /log /export /fingerprint /kick /mute /unmute /ban /unban /verify /dm /filter /clear /help /sair")
+                    print(N + "  /sala /sumir /send /log /export /fingerprint /kick /mute /unmute /ban /verify /dm /filter /clear /help /sair")
                 elif raw.startswith('/sumir '):
                     msg = raw[7:]
                     if self.room_key:
@@ -505,16 +482,13 @@ class ChatClient:
                         enc['ephemeral'] = True
                         self.sio.emit('mensagem', {'token': self.token, 'user': self.username, **enc})
                         print(f"[{datetime.now():%H:%M}] Você (⚡ efêmero): {msg}")
-                    else:
-                        log("Aguardando chave de sala...", "warn")
                 elif raw.startswith('/send '):
                     filepath = raw[6:].strip()
                     if os.path.exists(filepath) and os.path.getsize(filepath) < 5*1024*1024:
                         with open(filepath,'rb') as f: b64 = base64.b64encode(f.read()).decode()
                         self.sio.emit('mensagem', {'token':self.token, 'type':'file', 'filename':os.path.basename(filepath), 'filedata':b64, 'user':self.username})
                 elif raw.startswith('/kick ') and (self.is_admin or self.is_moderator):
-                    target = raw[6:].strip()
-                    self.sio.emit('kick_user', {'token':self.token, 'username':target})
+                    self.sio.emit('kick_user', {'token':self.token, 'username':raw[6:].strip()})
                 elif raw.startswith('/mute ') and (self.is_admin or self.is_moderator):
                     self.sio.emit('mute_user', {'token':self.token, 'username':raw[6:].strip()})
                 elif raw.startswith('/unmute ') and (self.is_admin or self.is_moderator):
