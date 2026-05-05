@@ -105,10 +105,10 @@ O cliente Python (ps.chat-cli.py) tenta encontrar o servidor automaticamente na 
 Se o servidor estiver rodando o ps.chat-mdns.py, o cliente detectará automaticamente o IP – você só precisará digitar o token.
 
 Para que a descoberta funcione:
-
+```
 · Servidor e cliente devem estar na mesma rede local
 · Servidor deve estar com ps.chat-mdns.py em execução (ou integrado ao ps.chat-adm.py v1.0+)
-
+```
 ---
 
 ## 📱 No Termux (Android)
