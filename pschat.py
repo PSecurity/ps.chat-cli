@@ -81,6 +81,20 @@ def discover(timeout=4):
         log(f"Falha na descoberta mDNS: {e}", "warn")
     return listener.hosts
 
+def connect_with_retry(url, retries=2, timeout=15):
+    sio = socketio.Client()
+    for attempt in range(1, retries + 1):
+        try:
+            log(f"Tentativa {attempt}/{retries}...", "info")
+            # Aumenta o timeout padrão do socketio
+            sio.connect(url, wait_timeout=timeout)
+            return sio
+        except Exception as e:
+            log(f"Falha na tentativa {attempt}: {e}", "err")
+            if attempt < retries:
+                time.sleep(2)
+    return None
+
 def main():
     banner()
     hosts = discover()
@@ -94,7 +108,16 @@ def main():
         port = int(port)
 
     url = f"http://{ip}:{port}"
-    sio = socketio.Client()
+    sio = connect_with_retry(url)
+    if sio is None:
+        log("Não foi possível conectar após várias tentativas.", "err")
+        print(D + "Verifique:"
+              "\n  - O servidor PS.Chat Admin está rodando?"
+              "\n  - O IP e a porta estão corretos?"
+              "\n  - Firewall/isolamento do Wi‑Fi não está bloqueando a porta 5000."
+              "\n  - Tente acessar http://" + ip + ":" + str(port) + "/admin pelo navegador." + R)
+        sys.exit(1)
+
     alive = True
     token = ""
     username = ""
@@ -149,12 +172,6 @@ def main():
                     'text': msg,
                     'timestamp': datetime.now().isoformat()
                 })
-
-    try:
-        sio.connect(url, wait_timeout=10)
-    except Exception as e:
-        log(f"Falha ao conectar: {e}", "err")
-        sys.exit(1)
 
     t = threading.Thread(target=input_loop, daemon=True)
     t.start()
