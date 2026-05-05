@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-PS.Chat CLI v2.2 – E2EE, DM, ban, verify, eco local, autocompletar
+PS.Chat CLI v2.2.1 – E2EE, DM, ban, verify, device_id, chave de sala robusta
 """
 
-import sys, os, time, threading, subprocess, json, base64, hashlib, random, string, readline
+import sys, os, time, threading, subprocess, json, base64, hashlib, random, string, uuid, readline
 from datetime import datetime
 
 def ensure_dependencies():
@@ -49,6 +49,7 @@ C = "\033[38;5;51m"
 
 CONFIG_DIR = os.path.expanduser("~/.pschat")
 KEY_FILE = os.path.join(CONFIG_DIR, "keys.json")
+DEVICE_ID_FILE = os.path.join(CONFIG_DIR, "device_id")
 HISTORY_DIR = os.path.join(CONFIG_DIR, "history")
 DOWNLOAD_DIR = os.path.expanduser("~/Downloads/pschat")
 
@@ -66,6 +67,16 @@ def fingerprint(pub_pem: str) -> str:
     raw = base64.b64decode(pub_pem)
     sha = hashlib.sha256(raw).digest()[:10]
     return base64.b32encode(sha).decode().rstrip("=").lower()[:16]
+
+def get_device_id():
+    if os.path.exists(DEVICE_ID_FILE):
+        with open(DEVICE_ID_FILE) as f:
+            return f.read().strip()
+    did = str(uuid.uuid4())
+    os.makedirs(CONFIG_DIR, exist_ok=True)
+    with open(DEVICE_ID_FILE, 'w') as f:
+        f.write(did)
+    return did
 
 # ---- Cripto ----
 def generate_ephemeral_keys():
@@ -211,6 +222,7 @@ class ChatClient:
         self.log_filename = None
         self.log_messages = []
         self.current_filter = None
+        self.device_id = get_device_id()
         self._register_handlers()
 
     def _register_handlers(self):
@@ -224,6 +236,9 @@ class ChatClient:
             if data.get('status') == 'ok':
                 self.is_admin = True
                 print(Y + "👑 Admin autenticado." + R)
+                # Se for admin e ainda não tiver chave, gerar após um curto delay
+                if not self.room_key:
+                    threading.Timer(2.0, self._maybe_generate_room_key).start()
 
         @sio.on('promoted')
         def _(data):
@@ -252,6 +267,12 @@ class ChatClient:
                 log("Rotação de chave de sala.", "ok")
                 for peer in self.peers:
                     self._send_room_key_to(peer)
+            elif self.is_moderator and self.room_key:
+                # Moderador também pode rotacionar se não houver admin
+                self.room_key = os.urandom(32)
+                log("Moderador rotacionou a chave de sala.", "ok")
+                for peer in self.peers:
+                    self._send_room_key_to(peer)
 
         @sio.on('erro')
         def _(data):
@@ -261,6 +282,7 @@ class ChatClient:
         def _(data):
             if data['user'] == self.username: return
             self.peers[data['user']] = {'pubkey': data['pubkey'], 'sign_pubkey': data['sign_pubkey']}
+            log(f"Chave de {data['user']} armazenada.", "ok")
             if self.room_key:
                 self._send_room_key_to(data['user'])
 
@@ -275,6 +297,7 @@ class ChatClient:
                     self.peers[data['user']]['sign_pubkey'], self.priv)
                 if not self.room_key or data.get('admin'):
                     self.room_key = base64.b64decode(plain)
+                    log("Chave de sala recebida.", "ok")
             except Exception as e:
                 log(f"Falha room key: {e}", "err")
 
@@ -383,8 +406,13 @@ class ChatClient:
             'admin': self.is_admin
         })
 
+    def _maybe_generate_room_key(self):
+        if not self.room_key and self.is_admin:
+            self.generate_and_distribute_room_key()
+
     def generate_and_distribute_room_key(self):
         self.room_key = os.urandom(32)
+        log("Nova chave de sala gerada.", "ok")
         for peer in self.peers:
             self._send_room_key_to(peer)
 
@@ -397,7 +425,6 @@ class ChatClient:
         anon = input(N + "Entrar como anônimo? [s/N]: " + R).strip().lower()
         anonymous = anon == 's'
         self.priv, self.pub, self.sign_priv, self.sign_pub = load_or_create_keys(anonymous)
-        # linhas corrigidas abaixo
         self.pub_pem = base64.b64encode(
             self.pub.public_bytes(encoding=serialization.Encoding.PEM,
                                   format=serialization.PublicFormat.SubjectPublicKeyInfo)
@@ -440,13 +467,18 @@ class ChatClient:
             'pubkey': self.pub_pem,
             'sign_pubkey': self.sign_pub_pem,
             'senha': senha_sala,
-            'senha_admin': self.saved_admin_pass
+            'senha_admin': self.saved_admin_pass,
+            'device_id': self.device_id
         })
 
-        if self.is_admin and not self.room_key:
-            time.sleep(1)
-            if not self.room_key:
-                self.generate_and_distribute_room_key()
+        # Aguardar um pouco para que a chave chegue via admin ou outro membro
+        time.sleep(2)
+        if not self.room_key and not self.is_admin:
+            log("Aguardando chave de sala... (pode levar alguns segundos)", "warn")
+            for _ in range(5):
+                time.sleep(1)
+                if self.room_key:
+                    break
 
         def input_loop():
             while self.alive:
@@ -462,7 +494,8 @@ class ChatClient:
                 elif raw == '/sala':
                     self.sio.emit('sala_info', {'token': self.token})
                 elif raw == '/clear':
-                    os.system('clear'); print(banner())
+                    os.system('clear' if os.name != 'nt' else 'cls')
+                    print(banner())
                 elif raw == '/help':
                     print(N + "  /sala /sumir /send /log /export /fingerprint /kick /mute /unmute /ban /unban /verify /dm /filter /clear /help /sair")
                 elif raw.startswith('/sumir '):
@@ -472,6 +505,8 @@ class ChatClient:
                         enc['ephemeral'] = True
                         self.sio.emit('mensagem', {'token': self.token, 'user': self.username, **enc})
                         print(f"[{datetime.now():%H:%M}] Você (⚡ efêmero): {msg}")
+                    else:
+                        log("Aguardando chave de sala...", "warn")
                 elif raw.startswith('/send '):
                     filepath = raw[6:].strip()
                     if os.path.exists(filepath) and os.path.getsize(filepath) < 5*1024*1024:
