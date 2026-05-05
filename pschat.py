@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
-PS.Chat CLI v2.0 – E2EE + verificação de destinatário + anônimo + efêmeras + log + envio de arquivos
+PS.Chat CLI v2.0 – E2EE + Admin autenticado + Verificação de destinatário
 """
 
 import sys, os, time, threading, subprocess, json, base64, hashlib, random, string
 from datetime import datetime
-from pathlib import Path
 
 def ensure_dependencies():
     deps = {
@@ -54,6 +53,7 @@ N = "\033[38;5;177m"
 D = "\033[38;5;96m"
 G = "\033[38;5;48m"
 E = "\033[38;5;203m"
+Y = "\033[38;5;228m"  # ouro para admin
 
 CONFIG_DIR = os.path.expanduser("~/.pschat")
 KEY_FILE = os.path.join(CONFIG_DIR, "keys.json")
@@ -222,10 +222,11 @@ def main():
     url = f"http://{ip}:{port}"
     sio = socketio.Client()
     alive = True
-    peers = {}  # username -> {pubkey, sign_pubkey}
+    peers = {}
     token = ""
     if not anonymous:
         username = ""
+    is_admin = False  # novo
 
     logging_active = False
     log_password = None
@@ -237,27 +238,41 @@ def main():
         nonlocal token, username
         log("Conectado!", "ok")
         token = input(N + "Token da sala: " + R).strip()
+
+        # Perguntar senha do admin (opcional) logo após o token
+        senha_admin = input(Y + "Senha de admin (Enter se não for admin): " + R).strip() if not anonymous else ''
+
         if not anonymous:
             username = input(N + "Seu nome: " + R).strip() or "Anônimo"
+
         sio.emit('entrar', {
             'token': token,
             'username': username,
             'pubkey': pub_pem,
             'sign_pubkey': sign_pub_pem,
-            'senha': ''
+            'senha': '',                # senha da sala será pedida se necessário
+            'senha_admin': senha_admin
         })
+
+    @sio.on('admin_auth')
+    def on_admin_auth(data):
+        nonlocal is_admin
+        if data.get('status') == 'ok':
+            is_admin = True
+            print(Y + "👑 Admin autenticado." + R)
 
     @sio.on('erro')
     def on_err(data):
         msg = data.get('mensagem', 'Erro')
-        if 'Senha' in msg:
-            s = input(N + "Senha da sala: " + R).strip()
+        if 'Senha da sala' in msg:
+            senha = input(N + "Senha da sala: " + R).strip()
             sio.emit('entrar', {
                 'token': token,
                 'username': username,
                 'pubkey': pub_pem,
                 'sign_pubkey': sign_pub_pem,
-                'senha': s
+                'senha': senha,
+                'senha_admin': ''  # já foi enviado antes, mas não repetimos
             })
         else:
             log(msg, "err")
@@ -277,7 +292,6 @@ def main():
         if data.get('user') == username:
             return
 
-        # Arquivos
         if data.get('type') == 'file':
             filename = data.get('filename', 'arquivo')
             filedata = base64.b64decode(data['filedata'])
@@ -290,10 +304,8 @@ def main():
             sys.stdout.flush()
             return
 
-        # Mensagens criptografadas – verificar destinatário
         if 'ciphertext' in data and 'signature' in data:
             if data.get('recipient_pub') != pub_pem:
-                # Não é para este usuário
                 return
             peer = peers.get(data['user'])
             if not peer:
@@ -305,7 +317,10 @@ def main():
                 prefix = "🔒 seguro"
                 if data.get('ephemeral'):
                     prefix = "⚡ efêmero"
-                print(N + f"\n▸ {data['user']} ({prefix}): {txt}" + R)
+                user_display = data['user']
+                if data.get('admin'):
+                    user_display = Y + "👑 " + user_display + R  # destaque ouro
+                print(N + f"\n▸ {user_display} ({prefix}): {txt}" + R)
                 if logging_active:
                     log_messages.append(f"{data['user']}: {txt}")
             except (InvalidSignature, InvalidTag, ValueError, Exception) as e:
@@ -315,13 +330,15 @@ def main():
             sys.stdout.flush()
             return
 
-        # Sistema / texto plano
         if data.get('type') == 'system':
             print(D + f"\n  {data['text']}" + R)
         else:
-            print(D + f"\n▸ {data['user']}: {data.get('text','')}" + R)
+            user_display = data.get('user', '')
+            if data.get('admin'):
+                user_display = Y + "👑 " + user_display + R
+            print(D + f"\n▸ {user_display}: {data.get('text','')}" + R)
             if logging_active:
-                log_messages.append(f"{data['user']}: {data.get('text','')}")
+                log_messages.append(f"{user_display}: {data.get('text','')}")
         sys.stdout.write(P + ">>> " + R)
         sys.stdout.flush()
 
@@ -330,8 +347,9 @@ def main():
         members = data.get('members', [])
         print(N + "\n👥 Participantes:" + R)
         for m in members:
+            admin_icon = Y + "👑 " if m.get('admin') else ""
             key_status = "🔑" if m.get('has_pubkey') else "❌"
-            print(f"  {key_status} {m['username']}")
+            print(f"  {admin_icon}{key_status} {m['username']}{R}")
         sys.stdout.write(P + ">>> " + R)
         sys.stdout.flush()
 
@@ -455,7 +473,6 @@ def main():
                 else:
                     log("Comando /log inválido. Use on/off/show.", "warn")
             else:
-                # Mensagem normal
                 if token:
                     for peer_name, info in peers.items():
                         enc = encrypt_message(raw, info['pubkey'], priv, sign_priv)
