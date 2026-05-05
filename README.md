@@ -38,7 +38,7 @@ Este repositório contém **scripts clientes** para se conectar a um servidor [P
 ### Opção 1: Instalador automático (MAIS FÁCIL) – APENAS TERMUX
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/seu-usuario/ps.chat-client/main/ps.chat-installer.sh | bash
+curl -sSL https://raw.githubusercontent.com/PSecurity/ps.chat-client/main/ps.chat-installer.sh | bash
 ```
 
 O script irá:
@@ -51,7 +51,7 @@ O script irá:
 
 ```bash
 # Clone o repositório
-git clone https://github.com/seu-usuario/ps.chat-client.git
+git clone https://github.com/PSecurity/ps.chat-client.git
 cd ps.chat-client
 
 # Instale a dependência (apenas para descoberta automática)
