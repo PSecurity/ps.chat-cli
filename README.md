@@ -1,4 +1,3 @@
-
 # 👾 PS.Chat Client
 
 [![Version](https://img.shields.io/badge/version-1.0.0-blue.svg)](https://github.com/seu-usuario/ps.chat-client/releases)
