@@ -5,6 +5,7 @@ Instala dependências automaticamente, se necessário.
 """
 
 import sys, os, time, threading, subprocess
+from datetime import datetime
 
 def ensure_dependencies():
     missing = []
