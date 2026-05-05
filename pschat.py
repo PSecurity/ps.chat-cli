@@ -1,4 +1,18 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+#
+#  PS.Chat — Comunicação offline segura com E2EE
+#  Versão 2.2.9 (Server/Client)
+#
+#  Desenvolvido por: PeekSecurity
+#  Repositório: https://github.com/PSecurity/ps.chat-admin   (servidor)
+#               https://github.com/PSecurity/ps.chat-cli     (cliente)
+#
+#  Licença: MIT
+#
+#  ATENÇÃO: Este software é fornecido "como está", sem garantias.
+#  Utilize por sua conta e risco. A equipe PeekSecurity não se
+#  responsabiliza pelo uso indevido da ferramenta.
 """
 PS.Chat CLI v2.2.6 – E2EE + comandos de moderação + verify funcional + instalação inteligente
 """
