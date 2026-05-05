@@ -1,46 +1,39 @@
 #!/usr/bin/env python3
 """
-PS.Chat CLI — Cliente terminal seguro com E2EE
+PS.Chat CLI — Cliente terminal para salas offline
+Instala dependências automaticamente, se necessário.
 """
 
-import sys, os, time, threading, subprocess, json, base64, hashlib
+import sys, os, time, threading, subprocess
 from datetime import datetime
 
-# Instalação automática de dependências
 def ensure_dependencies():
-    deps = {
-        "socketio": "python-socketio[client]",
-        "zeroconf": "zeroconf",
-        "cryptography": "cryptography"
-    }
     missing = []
-    for mod, pkg in deps.items():
-        try:
-            __import__(mod)
-        except ImportError:
-            missing.append(pkg)
+    try:
+        import socketio
+    except ImportError:
+        missing.append("python-socketio[client]")
+    try:
+        from zeroconf import ServiceBrowser, Zeroconf, ServiceStateChange
+    except ImportError:
+        missing.append("zeroconf")
+    # cryptography NÃO é necessário para o cliente
     if missing:
         print("🔧 Dependências faltando:", ", ".join(missing))
-        ok = input("Instalar agora? [S/n]: ").strip().lower()
-        if ok in ('', 's', 'sim', 'yes'):
+        ok = input("Deseja instalá-las agora? [S/n]: ").strip().lower()
+        if ok in ('', 's', 'y', 'sim', 'yes'):
             for pkg in missing:
                 subprocess.check_call([sys.executable, "-m", "pip", "install", pkg])
-            print("✅ Instalação concluída. Reiniciando...\n")
+            print("✅ Instalação concluída. Reiniciando script...\n")
             os.execv(sys.executable, [sys.executable] + sys.argv)
         else:
-            print("❌ Instale manualmente e tente novamente.")
+            print("❌ Instalação recusada. Instale manualmente e tente novamente.")
             sys.exit(1)
 
 ensure_dependencies()
 
 import socketio
 from zeroconf import ServiceBrowser, Zeroconf, ServiceStateChange
-from cryptography.hazmat.primitives import hashes, serialization
-from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey, X25519PublicKey
-from cryptography.hazmat.primitives.kem import KeyEncapsulationMechanism
-from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-from cryptography.hazmat.primitives.asymmetric import padding
-from cryptography.hazmat.primitives import hashes
 
 # Cores ANSI
 R = "\033[0m"
@@ -51,9 +44,6 @@ D = "\033[38;5;96m"
 G = "\033[38;5;48m"
 E = "\033[38;5;203m"
 
-CONFIG_DIR = os.path.expanduser("~/.pschat")
-KEY_FILE = os.path.join(CONFIG_DIR, "keys.json")
-
 def banner():
     print(P + B + r"""
   ╔══════════════════════════════╗
@@ -62,66 +52,17 @@ def banner():
 """ + R)
 
 def log(msg, level='info'):
-    pre = {'info': D+"[●]"+R, 'ok': G+"[✔]"+R, 'warn': D+"[!]"+R, 'err': E+"[✘]"+R}
-    print(pre.get(level, D+"[ ]"+R) + " " + msg)
+    pre = {
+        'info': D + "[●]" + R,
+        'ok': G + "[✔]" + R,
+        'warn': D + "[!]" + R,
+        'err': E + "[✘]" + R,
+    }.get(level, D + "[ ]" + R)
+    print(pre + " " + msg)
 
-def load_or_create_keys():
-    """Carrega ou gera par de chaves X25519"""
-    if os.path.exists(KEY_FILE):
-        with open(KEY_FILE) as f:
-            data = json.load(f)
-            priv = serialization.load_pem_private_key(base64.b64decode(data['private']), password=None)
-            pub  = serialization.load_pem_public_key(base64.b64decode(data['public']))
-            return priv, pub
-    os.makedirs(CONFIG_DIR, exist_ok=True)
-    priv = X25519PrivateKey.generate()
-    pub  = priv.public_key()
-    data = {
-        'private': base64.b64encode(
-            priv.private_bytes(encoding=serialization.Encoding.PEM,
-                               format=serialization.PrivateFormat.PKCS8,
-                               encryption_algorithm=serialization.NoEncryption())
-        ).decode(),
-        'public': base64.b64encode(
-            pub.public_bytes(encoding=serialization.Encoding.PEM,
-                             format=serialization.PublicFormat.SubjectPublicKeyInfo)
-        ).decode()
-    }
-    with open(KEY_FILE, 'w') as f:
-        json.dump(data, f, indent=2)
-    try: os.chmod(KEY_FILE, 0o600)
-    except: pass
-    return priv, pub
-
-def encrypt_message(plaintext: str, recipient_pub_pem: str, sender_priv: X25519PrivateKey) -> dict:
-    """Criptografa mensagem para destinatário usando ECDH + AES-GCM"""
-    recipient_pub = serialization.load_pem_public_key(base64.b64decode(recipient_pub_pem))
-    shared_key = sender_priv.exchange(recipient_pub)
-    derived_key = hashlib.sha256(shared_key).digest()
-    aesgcm = AESGCM(derived_key)
-    nonce = os.urandom(12)
-    ciphertext = aesgcm.encrypt(nonce, plaintext.encode(), None)
-    # Assinar (opcional, pode ser adicionado depois)
-    return {
-        'nonce': base64.b64encode(nonce).decode(),
-        'ciphertext': base64.b64encode(ciphertext).decode(),
-        'recipient_pub': recipient_pub_pem
-    }
-
-def decrypt_message(encrypted: dict, sender_pub_pem: str, recipient_priv: X25519PrivateKey) -> str:
-    """Descriptografa mensagem vinda de remetente"""
-    sender_pub = serialization.load_pem_public_key(base64.b64decode(sender_pub_pem))
-    shared_key = recipient_priv.exchange(sender_pub)
-    derived_key = hashlib.sha256(shared_key).digest()
-    aesgcm = AESGCM(derived_key)
-    nonce = base64.b64decode(encrypted['nonce'])
-    ciphertext = base64.b64decode(encrypted['ciphertext'])
-    plaintext = aesgcm.decrypt(nonce, ciphertext, None)
-    return plaintext.decode()
-
-# Descoberta mDNS (mantida igual)
 class PSChatListener:
-    def __init__(self): self.hosts = []
+    def __init__(self):
+        self.hosts = []
     def add_service(self, zc, type_, name):
         info = zc.get_service_info(type_, name)
         if info:
@@ -138,86 +79,79 @@ def discover(timeout=4):
         time.sleep(timeout)
         zc.close()
     except Exception as e:
-        log(f"Falha mDNS: {e}", "warn")
+        log(f"Falha na descoberta mDNS: {e}", "warn")
     return listener.hosts
 
 def connect_with_retry(url, retries=2, timeout=15):
     sio = socketio.Client()
-    for i in range(1, retries+1):
+    for attempt in range(1, retries + 1):
         try:
+            log(f"Tentativa {attempt}/{retries}...", "info")
             sio.connect(url, wait_timeout=timeout)
             return sio
         except Exception as e:
-            log(f"Tentativa {i} falhou: {e}", "err")
-            if i < retries: time.sleep(2)
+            log(f"Falha na tentativa {attempt}: {e}", "err")
+            if attempt < retries:
+                time.sleep(2)
     return None
 
 def main():
     banner()
-    priv, pub = load_or_create_keys()
-    pub_pem = base64.b64encode(
-        pub.public_bytes(encoding=serialization.Encoding.PEM,
-                         format=serialization.PublicFormat.SubjectPublicKeyInfo)
-    ).decode()
-    log("Chave pública carregada.", "ok")
-
     hosts = discover()
     if hosts:
         ip, port = hosts[0]
-        log(f"Servidor: {ip}:{port}", "ok")
+        log(f"Servidor encontrado: {ip}:{port}", "ok")
     else:
-        log("Servidor não encontrado via mDNS.", "warn")
-        ip = input(N + "IP: " + R).strip()
-        port = int(input(N + "Porta [5000]: " + R).strip() or "5000")
+        log("Nenhum servidor via mDNS.", "warn")
+        ip = input(N + "IP do servidor: " + R).strip()
+        port = input(N + "Porta [5000]: " + R).strip() or "5000"
+        port = int(port)
 
     url = f"http://{ip}:{port}"
     sio = connect_with_retry(url)
-    if not sio:
-        log("Conexão falhou.", "err")
+    if sio is None:
+        log("Não foi possível conectar após várias tentativas.", "err")
+        print(D + "Verifique:"
+              "\n  - O servidor PS.Chat Admin está rodando?"
+              "\n  - O IP e a porta estão corretos?"
+              "\n  - Firewall/isolamento do Wi‑Fi não está bloqueando a porta 5000."
+              "\n  - Tente acessar http://" + ip + ":" + str(port) + "/admin pelo navegador." + R)
         sys.exit(1)
 
-    token = input(N + "Token da sala: " + R).strip()
-    username = input(N + "Seu nome: " + R).strip() or "Anônimo"
     alive = True
-
-    # Armazenar chaves públicas dos outros membros
-    peers_keys = {}   # username -> pub_pem
+    token = ""
+    username = ""
 
     @sio.event
     def connect():
+        nonlocal token, username
         log("Conectado!", "ok")
-        # Envia chave pública ao entrar
-        sio.emit('entrar', {'token': token, 'username': username, 'pubkey': pub_pem})
+        token = input(N + "Token da sala: " + R).strip()
+        username = input(N + "Seu nome: " + R).strip() or "Anônimo"
+        sio.emit('entrar', {'token': token, 'username': username})
 
     @sio.on('mensagem')
     def on_msg(data):
-        # Se a mensagem contém 'pubkey', é um anúncio de chave
-        if 'pubkey' in data and data['user'] != username:
-            peers_keys[data['user']] = data['pubkey']
-            log(f"Chave recebida de {data['user']}", "ok")
-            return
-        # Se for mensagem criptografada
-        if 'ciphertext' in data:
-            try:
-                plain = decrypt_message(data, peers_keys.get(data['user']), priv)
-                print(N + f"\n▸ {data['user']} (seguro): {plain}" + R)
-                sys.stdout.write(P + ">>> " + R)
-                sys.stdout.flush()
-            except Exception as e:
-                log(f"Falha ao descriptografar: {e}", "err")
+        user = data.get('user', '')
+        text = data.get('text', '')
+        ts = data.get('timestamp', '')
+        if user.startswith('⚡'):
+            print(D + f"  {text}" + R)
+        elif user == username:
+            print(G + f"\n▸ {user}: {text}  {D}{ts}{R}")
         else:
-            # Mensagem normal (legado/admin)
-            print(D + f"\n▸ {data['user']}: {data.get('text', '')}" + R)
-            sys.stdout.write(P + ">>> " + R)
-            sys.stdout.flush()
+            print(N + f"\n▸ {user}: {text}  {D}{ts}{R}")
+        sys.stdout.write(P + ">>> " + R)
+        sys.stdout.flush()
 
     @sio.on('erro')
-    def on_err(data): log(data.get('mensagem', 'Erro'), "err")
+    def on_err(data):
+        log(data.get('mensagem', 'Erro'), "err")
 
     @sio.event
     def disconnect():
         nonlocal alive
-        log("Desconectado.", "err")
+        log("Conexão encerrada.", "err")
         alive = False
 
     def input_loop():
@@ -225,32 +159,29 @@ def main():
         while alive:
             try:
                 msg = input(P + ">>> " + R).strip()
-            except: break
+            except:
+                alive = False
+                break
             if msg.lower() == '/sair':
-                alive = False; sio.disconnect(); break
+                alive = False
+                sio.disconnect()
+                break
             elif msg:
-                # Se há pelo menos um peer com chave, envia criptografado para todos
-                if peers_keys:
-                    for peer, peer_pub in peers_keys.items():
-                        enc = encrypt_message(msg, peer_pub, priv)
-                        sio.emit('mensagem', {
-                            'token': token,
-                            'user': username,
-                            **enc
-                        })
-                else:
-                    # Fallback: envia em texto plano (apenas para salas sem E2EE)
-                    sio.emit('mensagem', {
-                        'token': token,
-                        'text': msg,
-                        'timestamp': datetime.now().isoformat()
-                    })
+                sio.emit('mensagem', {
+                    'token': token,
+                    'text': msg,
+                    'timestamp': datetime.now().isoformat()
+                })
 
-    threading.Thread(target=input_loop, daemon=True).start()
-    while alive: time.sleep(0.5)
+    t = threading.Thread(target=input_loop, daemon=True)
+    t.start()
+    while alive:
+        time.sleep(0.5)
     sio.disconnect()
     log("Chat encerrado.", "info")
 
 if __name__ == '__main__':
-    try: main()
-    except KeyboardInterrupt: print("\n" + D + "Encerrado." + R)
+    try:
+        main()
+    except KeyboardInterrupt:
+        print("\n" + D + "Encerrado." + R)
