@@ -1,29 +1,65 @@
 #!/usr/bin/env python3
 """
-PS.Chat CLI v2.2.6 – E2EE + comandos de moderação + verify funcional + log notificado
+PS.Chat CLI v2.2.6 – E2EE + comandos de moderação + verify funcional + instalação inteligente
 """
 
 import sys, os, time, threading, subprocess, json, base64, hashlib, random, string, uuid, readline
 from datetime import datetime
 
+# ---------- Detecção do ambiente ----------
+def is_termux():
+    return os.path.isdir("/data/data/com.termux/files/usr")
+
 # ---------- Auto-instalação de dependências ----------
 def ensure_dependencies():
-    deps = {"socketio": "python-socketio[client]", "zeroconf": "zeroconf", "cryptography": "cryptography"}
+    deps = {
+        "socketio": "python-socketio[client]",
+        "zeroconf": "zeroconf",
+    }
+    # cryptography é tratada separadamente por causa do Termux
     missing = []
     for mod, pkg in deps.items():
         try:
             __import__(mod)
         except ImportError:
             missing.append(pkg)
+
+    # Verifica cryptography
+    try:
+        import cryptography
+    except ImportError:
+        if is_termux():
+            print("🔧 Instalando cryptography via Termux...")
+            try:
+                subprocess.check_call(["pkg", "install", "-y", "python-cryptography"])
+            except Exception:
+                print("❌ Falha ao instalar python-cryptography.")
+                print("   Execute manualmente: pkg install python-cryptography")
+                sys.exit(1)
+        else:
+            missing.append("cryptography")
+
     if missing:
         print("🔧 Dependências faltando:", ", ".join(missing))
         ok = input("Instalar agora? [S/n]: ").strip().lower()
         if ok in ('', 's', 'sim', 'yes'):
             for pkg in missing:
-                subprocess.check_call([sys.executable, "-m", "pip", "install", pkg])
+                try:
+                    subprocess.check_call([sys.executable, "-m", "pip", "install", pkg])
+                except subprocess.CalledProcessError:
+                    print(f"❌ Falha ao instalar {pkg}.")
+                    if "cryptography" in pkg and is_termux():
+                        print("   No Termux, use: pkg install python-cryptography")
+                    sys.exit(1)
             print("✅ Instalação concluída. Reiniciando...\n")
             os.execv(sys.executable, [sys.executable] + sys.argv)
         else:
+            print("❌ Dependências necessárias. Instale manualmente e tente novamente.")
+            if is_termux():
+                print("   pkg install python-cryptography")
+                print("   pip install python-socketio[client] zeroconf")
+            else:
+                print("   pip install python-socketio[client] zeroconf cryptography")
             sys.exit(1)
 
 ensure_dependencies()
@@ -201,6 +237,7 @@ class ChatClient:
         self.device_id = get_device_id()
         self._register_handlers()
 
+    # ---------- Handlers de eventos ----------
     def _register_handlers(self):
         sio = self.sio
 
@@ -293,6 +330,7 @@ class ChatClient:
             if data.get('user') == self.username: return
             ts = datetime.now().strftime("[%H:%M]")
 
+            # DM
             if 'dm_target' in data or ('ciphertext' in data and not data.get('room_encrypted')):
                 peer = self.peers.get(data['user'])
                 if peer:
@@ -305,6 +343,7 @@ class ChatClient:
                         log("Falha ao decifrar DM.", "err")
                 return
 
+            # Arquivo
             if data.get('type') == 'file':
                 filename = data.get('filename', 'arquivo')
                 filedata = base64.b64decode(data['filedata'])
@@ -314,6 +353,7 @@ class ChatClient:
                 print(G + f"📎 Arquivo recebido: {path}" + R)
                 return
 
+            # Sala (mensagem normal)
             txt = data.get('text', '')
             if data.get('room_encrypted') and self.room_key:
                 try:
@@ -323,6 +363,7 @@ class ChatClient:
                 except: return
             if self.current_filter and not txt.startswith(f"#{self.current_filter}"): return
 
+            # Menção
             if f"@{self.username}" in txt:
                 print("\a" + C + B + f"💬 {ts} {data['user']}: {txt}" + R)
             else:
@@ -356,6 +397,7 @@ class ChatClient:
             self.alive = False
             log("Conexão encerrada.", "err")
 
+    # ---------- Envio de chave de sala ----------
     def _send_room_key_to(self, dest):
         if not self.room_key: return
         peer = self.peers.get(dest)
@@ -373,6 +415,7 @@ class ChatClient:
         for peer in self.peers:
             self._send_room_key_to(peer)
 
+    # ========== EXECUÇÃO PRINCIPAL ==========
     def run(self):
         banner()
 
@@ -427,12 +470,14 @@ class ChatClient:
             'device_id': self.device_id
         })
 
+        # Timer para gerar chave se ninguém mais o fizer
         def generate_if_no_key():
             time.sleep(3)
             if not self.room_key:
                 self.generate_and_distribute_room_key()
         threading.Thread(target=generate_if_no_key, daemon=True).start()
 
+        # ---------- Loop de entrada ----------
         def input_loop():
             while self.alive:
                 try:
@@ -504,9 +549,7 @@ class ChatClient:
                     if len(parts) < 2: continue
                     subcmd = parts[1].lower()
                     if subcmd == 'on' and len(parts) >= 3:
-                        self.log_password = parts[2]
-                        self.logging_active = True
-                        self.log_messages = []
+                        self.log_password = parts[2]; self.logging_active = True; self.log_messages = []
                         self.log_filename = os.path.join(HISTORY_DIR, f"{self.token}.log.enc")
                         os.makedirs(HISTORY_DIR, exist_ok=True)
                         log("Histórico ativado.", "ok")
@@ -517,47 +560,37 @@ class ChatClient:
                                 key = hashlib.sha256(self.log_password.encode()).digest()
                                 aeslog = AESGCM(key); nonce = os.urandom(12)
                                 ctext = aeslog.encrypt(nonce, content.encode(), None)
-                                with open(self.log_filename,'w') as f:
-                                    f.write(json.dumps({'nonce':base64.b64encode(nonce).decode(),
-                                                        'ciphertext':base64.b64encode(ctext).decode()}))
+                                with open(self.log_filename,'w') as f: f.write(json.dumps({'nonce':base64.b64encode(nonce).decode(), 'ciphertext':base64.b64encode(ctext).decode()}))
                                 log("Histórico salvo e desativado.", "ok")
                             else:
                                 log("Nenhuma mensagem registrada. Log desativado.", "warn")
-                            self.logging_active = False
-                            self.log_password = None
+                            self.logging_active = False; self.log_password = None
                         else:
                             log("O log já está desativado.", "info")
                     elif subcmd == 'show':
                         if not self.log_filename or not os.path.exists(self.log_filename):
-                            log("Nenhum arquivo de log encontrado.", "warn")
+                            log("Nenhum log.", "warn")
                         else:
                             pwd = input("Senha do log: ").strip()
                             with open(self.log_filename) as f: d = json.load(f)
                             key = hashlib.sha256(pwd.encode()).digest(); aeslog = AESGCM(key)
                             try:
-                                plain = aeslog.decrypt(base64.b64decode(d['nonce']),
-                                                       base64.b64decode(d['ciphertext']), None)
+                                plain = aeslog.decrypt(base64.b64decode(d['nonce']), base64.b64decode(d['ciphertext']), None)
                                 print(plain.decode())
-                            except Exception:
-                                log("Senha incorreta ou arquivo corrompido.", "err")
-                    else:
-                        log("Uso: /log on <senha> | /log off | /log show", "warn")
+                            except: log("Senha ou arquivo inválido.", "err")
                 elif raw == '/export':
                     if not self.log_filename or not os.path.exists(self.log_filename):
-                        log("Nenhum log salvo para exportar.", "warn")
+                        log("Nenhum log salvo.", "warn")
                     else:
                         pwd = input("Senha do log: ").strip()
                         with open(self.log_filename) as f: d = json.load(f)
                         key = hashlib.sha256(pwd.encode()).digest(); aeslog = AESGCM(key)
                         try:
-                            plain = aeslog.decrypt(base64.b64decode(d['nonce']),
-                                                   base64.b64decode(d['ciphertext']), None)
-                            export_path = os.path.join(HISTORY_DIR,
-                                                       f"{self.token}_{int(time.time())}.txt")
+                            plain = aeslog.decrypt(base64.b64decode(d['nonce']), base64.b64decode(d['ciphertext']), None)
+                            export_path = os.path.join(HISTORY_DIR, f"{self.token}_{int(time.time())}.txt")
                             with open(export_path,'w') as f: f.write(plain.decode())
                             log(f"Exportado: {export_path}", "ok")
-                        except Exception:
-                            log("Falha na exportação. Verifique a senha.", "err")
+                        except: log("Falha na exportação.", "err")
                 elif raw == '/fingerprint':
                     print(Y + f"🔑 Seu fingerprint: {fingerprint(self.pub_pem)}" + R)
                 elif raw.startswith('/filter '):
@@ -589,9 +622,7 @@ class ChatClient:
             key = hashlib.sha256(self.log_password.encode()).digest()
             aeslog = AESGCM(key); nonce = os.urandom(12)
             ctext = aeslog.encrypt(nonce, content.encode(), None)
-            with open(self.log_filename,'w') as f:
-                f.write(json.dumps({'nonce':base64.b64encode(nonce).decode(),
-                                    'ciphertext':base64.b64encode(ctext).decode()}))
+            with open(self.log_filename,'w') as f: f.write(json.dumps({'nonce':base64.b64encode(nonce).decode(), 'ciphertext':base64.b64encode(ctext).decode()}))
         self.sio.disconnect()
         log("Chat encerrado.", "info")
         sys.exit(0)
