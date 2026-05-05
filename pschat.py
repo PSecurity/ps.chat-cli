@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
 """
-PS.Chat CLI v2.0 – E2EE + efêmeras + log + arquivos + anônimo + resolução de chaves
+PS.Chat CLI v2.0 – E2EE + verificação de destinatário + anônimo + efêmeras + log + envio de arquivos
 """
 
 import sys, os, time, threading, subprocess, json, base64, hashlib, random, string
 from datetime import datetime
 from pathlib import Path
 
-# ========== Dependências automáticas ==========
 def ensure_dependencies():
     deps = {
         "socketio": "python-socketio[client]",
@@ -48,7 +47,6 @@ from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 from cryptography.exceptions import InvalidSignature, InvalidTag
 
-# Cores
 R = "\033[0m"
 B = "\033[1m"
 P = "\033[38;5;135m"
@@ -73,7 +71,6 @@ def log(msg, level='info'):
     pre = {'info': D+"[●]"+R, 'ok': G+"[✔]"+R, 'warn': D+"[!]"+R, 'err': E+"[✘]"+R}
     print(pre.get(level, D+"[ ]"+R) + " " + msg)
 
-# ========== Chaves ==========
 def generate_ephemeral_keys():
     priv = X25519PrivateKey.generate()
     pub = priv.public_key()
@@ -98,31 +95,26 @@ def load_or_create_keys(anonymous=False):
     sign_priv = Ed25519PrivateKey.generate()
     sign_pub  = sign_priv.public_key()
     data = {
-        'private': base64.b64encode(priv.private_bytes(
-            encoding=serialization.Encoding.PEM,
-            format=serialization.PrivateFormat.PKCS8,
-            encryption_algorithm=serialization.NoEncryption()
-        )).decode(),
-        'public': base64.b64encode(pub.public_bytes(
-            encoding=serialization.Encoding.PEM,
-            format=serialization.PublicFormat.SubjectPublicKeyInfo
-        )).decode(),
-        'sign_private': base64.b64encode(sign_priv.private_bytes(
-            encoding=serialization.Encoding.PEM,
-            format=serialization.PrivateFormat.PKCS8,
-            encryption_algorithm=serialization.NoEncryption()
-        )).decode(),
-        'sign_public': base64.b64encode(sign_pub.public_bytes(
-            encoding=serialization.Encoding.PEM,
-            format=serialization.PublicFormat.SubjectPublicKeyInfo
-        )).decode()
+        'private': base64.b64encode(
+            priv.private_bytes(encoding=serialization.Encoding.PEM,
+                               format=serialization.PrivateFormat.PKCS8,
+                               encryption_algorithm=serialization.NoEncryption())).decode(),
+        'public': base64.b64encode(
+            pub.public_bytes(encoding=serialization.Encoding.PEM,
+                             format=serialization.PublicFormat.SubjectPublicKeyInfo)).decode(),
+        'sign_private': base64.b64encode(
+            sign_priv.private_bytes(encoding=serialization.Encoding.PEM,
+                                    format=serialization.PrivateFormat.PKCS8,
+                                    encryption_algorithm=serialization.NoEncryption())).decode(),
+        'sign_public': base64.b64encode(
+            sign_pub.public_bytes(encoding=serialization.Encoding.PEM,
+                                  format=serialization.PublicFormat.SubjectPublicKeyInfo)).decode()
     }
     with open(KEY_FILE, 'w') as f:
         json.dump(data, f, indent=2)
     os.chmod(KEY_FILE, 0o600)
     return priv, pub, sign_priv, sign_pub
 
-# ========== Criptografia ==========
 def encrypt_message(plaintext, recipient_pub_pem, sender_priv, sign_priv):
     recipient_pub = serialization.load_pem_public_key(base64.b64decode(recipient_pub_pem))
     shared_key = sender_priv.exchange(recipient_pub)
@@ -154,7 +146,6 @@ def decrypt_message(encrypted, sender_pub_pem, sender_sign_pub_pem, recipient_pr
     plaintext = aesgcm.decrypt(nonce, ciphertext, None)
     return plaintext.decode()
 
-# ========== Histórico local criptografado ==========
 def derive_key(password, salt=None):
     if salt is None:
         salt = os.urandom(16)
@@ -180,7 +171,6 @@ def decrypt_file(encrypted_str, password):
     plaintext = aesgcm.decrypt(nonce, ciphertext, None)
     return plaintext.decode()
 
-# ========== Descoberta mDNS ==========
 class PSChatListener:
     def __init__(self): self.hosts = []
     def add_service(self, zc, type_, name):
@@ -202,11 +192,8 @@ def discover(timeout=4):
         log(f"Falha mDNS: {e}", "warn")
     return listener.hosts
 
-# ========== Principal ==========
 def main():
     banner()
-
-    # Modo anônimo?
     anon = input(N + "Entrar como anônimo? [s/N]: " + R).strip().lower()
     anonymous = anon == 's'
 
@@ -235,7 +222,7 @@ def main():
     url = f"http://{ip}:{port}"
     sio = socketio.Client()
     alive = True
-    peers = {}
+    peers = {}  # username -> {pubkey, sign_pubkey}
     token = ""
     if not anonymous:
         username = ""
@@ -289,6 +276,8 @@ def main():
     def on_msg(data):
         if data.get('user') == username:
             return
+
+        # Arquivos
         if data.get('type') == 'file':
             filename = data.get('filename', 'arquivo')
             filedata = base64.b64decode(data['filedata'])
@@ -301,7 +290,11 @@ def main():
             sys.stdout.flush()
             return
 
+        # Mensagens criptografadas – verificar destinatário
         if 'ciphertext' in data and 'signature' in data:
+            if data.get('recipient_pub') != pub_pem:
+                # Não é para este usuário
+                return
             peer = peers.get(data['user'])
             if not peer:
                 sio.emit('solicitar_chave', {'token': token, 'username': data['user']})
@@ -316,17 +309,19 @@ def main():
                 if logging_active:
                     log_messages.append(f"{data['user']}: {txt}")
             except (InvalidSignature, InvalidTag, ValueError, Exception) as e:
-                # Provavelmente a chave está desatualizada, solicitar nova
                 sio.emit('solicitar_chave', {'token': token, 'username': data['user']})
-                log(f"Falha ao descriptografar mensagem de {data['user']} – solicitando chave atualizada.", "err")
-                return
-        elif data.get('type') == 'system':
+                log(f"Falha ao descriptografar de {data['user']} – chave solicitada.", "err")
+            sys.stdout.write(P + ">>> " + R)
+            sys.stdout.flush()
+            return
+
+        # Sistema / texto plano
+        if data.get('type') == 'system':
             print(D + f"\n  {data['text']}" + R)
         else:
-            txt = data.get('text', '')
-            print(D + f"\n▸ {data['user']}: {txt}" + R)
+            print(D + f"\n▸ {data['user']}: {data.get('text','')}" + R)
             if logging_active:
-                log_messages.append(f"{data['user']}: {txt}")
+                log_messages.append(f"{data['user']}: {data.get('text','')}")
         sys.stdout.write(P + ">>> " + R)
         sys.stdout.flush()
 
@@ -383,7 +378,7 @@ def main():
 ║  /send arq   - Enviar arquivo           ║
 ║  /log on <senha> - Ativar histórico     ║
 ║  /log off    - Desativar histórico      ║
-║  /log show   - Mostrar últimas linhas   ║
+║  /log show   - Mostrar log descript.    ║
 ║  /clear      - Limpar a tela            ║
 ║  /help       - Esta ajuda               ║
 ║  /sair       - Sair da sala             ║
@@ -394,21 +389,13 @@ def main():
             elif raw.lower().startswith('/sumir '):
                 msg = raw[7:].strip()
                 if msg and token:
-                    if peers:
-                        for peer, info in peers.items():
-                            enc = encrypt_message(msg, info['pubkey'], priv, sign_priv)
-                            enc['ephemeral'] = True
-                            sio.emit('mensagem', {
-                                'token': token,
-                                'user': username,
-                                **enc
-                            })
-                    else:
+                    for peer_name, info in peers.items():
+                        enc = encrypt_message(msg, info['pubkey'], priv, sign_priv)
+                        enc['ephemeral'] = True
                         sio.emit('mensagem', {
                             'token': token,
-                            'text': msg,
-                            'timestamp': datetime.now().isoformat(),
-                            'ephemeral': True
+                            'user': username,
+                            **enc
                         })
             elif raw.lower().startswith('/send '):
                 filepath = raw[6:].strip()
@@ -468,25 +455,20 @@ def main():
                 else:
                     log("Comando /log inválido. Use on/off/show.", "warn")
             else:
+                # Mensagem normal
                 if token:
-                    if peers:
-                        for peer, info in peers.items():
-                            enc = encrypt_message(raw, info['pubkey'], priv, sign_priv)
-                            sio.emit('mensagem', {
-                                'token': token,
-                                'user': username,
-                                **enc
-                            })
-                    else:
+                    for peer_name, info in peers.items():
+                        enc = encrypt_message(raw, info['pubkey'], priv, sign_priv)
                         sio.emit('mensagem', {
                             'token': token,
-                            'text': raw,
-                            'timestamp': datetime.now().isoformat()
+                            'user': username,
+                            **enc
                         })
 
     threading.Thread(target=input_loop, daemon=True).start()
     while alive:
         time.sleep(0.5)
+
     if logging_active and log_messages:
         content = "\n".join(log_messages[-200:])
         enc_content = encrypt_file(content, log_password)
