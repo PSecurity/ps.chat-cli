@@ -1,16 +1,37 @@
 #!/usr/bin/env python3
 """
 PS.Chat CLI — Cliente terminal para salas offline
+Instala dependências automaticamente, se necessário.
 """
 
-import sys, os, time, threading, socketio
-from datetime import datetime
+import sys, os, time, threading, subprocess
 
-try:
-    from zeroconf import ServiceBrowser, Zeroconf, ServiceStateChange
-    ZEROCONF = True
-except ImportError:
-    ZEROCONF = False
+def ensure_dependencies():
+    missing = []
+    try:
+        import socketio
+    except ImportError:
+        missing.append("python-socketio[client]")
+    try:
+        from zeroconf import ServiceBrowser, Zeroconf, ServiceStateChange
+    except ImportError:
+        missing.append("zeroconf")
+    if missing:
+        print("🔧 Dependências faltando:", ", ".join(missing))
+        ok = input("Deseja instalá-las agora? [S/n]: ").strip().lower()
+        if ok in ('', 's', 'y', 'sim', 'yes'):
+            for pkg in missing:
+                subprocess.check_call([sys.executable, "-m", "pip", "install", pkg])
+            print("✅ Instalação concluída. Reiniciando script...\n")
+            os.execv(sys.executable, [sys.executable] + sys.argv)
+        else:
+            print("❌ Instalação recusada. Instale manualmente e tente novamente.")
+            sys.exit(1)
+
+ensure_dependencies()
+
+import socketio
+from zeroconf import ServiceBrowser, Zeroconf, ServiceStateChange
 
 # Cores ANSI
 R = "\033[0m"
@@ -49,13 +70,14 @@ class PSChatListener:
     def remove_service(self, *args): pass
 
 def discover(timeout=4):
-    if not ZEROCONF:
-        return []
     listener = PSChatListener()
-    zc = Zeroconf()
-    ServiceBrowser(zc, "_pschat._tcp.local.", listener)
-    time.sleep(timeout)
-    zc.close()
+    try:
+        zc = Zeroconf()
+        ServiceBrowser(zc, "_pschat._tcp.local.", listener)
+        time.sleep(timeout)
+        zc.close()
+    except Exception as e:
+        log(f"Falha na descoberta mDNS: {e}", "warn")
     return listener.hosts
 
 def main():
