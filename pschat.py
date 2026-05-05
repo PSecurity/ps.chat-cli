@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-PS.Chat CLI v2.2.6 – E2EE + comandos de moderação + verify funcional
+PS.Chat CLI v2.2.6 – E2EE + comandos de moderação + verify funcional + saída limpa
 """
 
 import sys, os, time, threading, subprocess, json, base64, hashlib, random, string, uuid, readline
@@ -153,8 +153,7 @@ def decrypt_room_message(encrypted, room_key, sender_sign_pub_pem):
 
 # ---------- Autocompletar ----------
 COMMANDS = ['/sair','/sala','/sumir','/send','/log','/export','/fingerprint',
-            '/kick','/mute','/unmute','/ban','/verify','/dm','/filter','/clear','/help',
-            '/promote','/demote']
+            '/kick','/mute','/unmute','/ban','/promote','/demote','/verify','/dm','/filter','/clear','/help']
 def completer(text, state):
     options = [c for c in COMMANDS if c.startswith(text)]
     if state < len(options): return options[state]
