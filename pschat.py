@@ -1,81 +1,147 @@
 #!/usr/bin/env python3
-# ps.chat-cli.py - Cliente PS.Chat com descoberta automática (mDNS) e fallback manual
+"""
+PS.Chat CLI — Cliente terminal para salas offline
+"""
 
-import sys
-import socket
-import webbrowser
-import subprocess
-from zeroconf import ServiceBrowser, Zeroconf, ServiceListener
+import sys, os, time, threading, socketio
+from datetime import datetime
 
-class PSChatListener(ServiceListener):
+try:
+    from zeroconf import ServiceBrowser, Zeroconf, ServiceStateChange
+    ZEROCONF = True
+except ImportError:
+    ZEROCONF = False
+
+# Cores ANSI
+R = "\033[0m"
+B = "\033[1m"
+P = "\033[38;5;135m"
+N = "\033[38;5;177m"
+D = "\033[38;5;96m"
+G = "\033[38;5;48m"
+E = "\033[38;5;203m"
+
+def banner():
+    print(P + B + r"""
+  ╔══════════════════════════════╗
+  ║  PS.CHAT CLI  ▸ PeekSecurity║
+  ╚══════════════════════════════╝
+""" + R)
+
+def log(msg, level='info'):
+    pre = {
+        'info': D + "[●]" + R,
+        'ok': G + "[✔]" + R,
+        'warn': D + "[!]" + R,
+        'err': E + "[✘]" + R,
+    }.get(level, D + "[ ]" + R)
+    print(pre + " " + msg)
+
+class PSChatListener:
     def __init__(self):
-        self.services = []
-
+        self.hosts = []
     def add_service(self, zc, type_, name):
         info = zc.get_service_info(type_, name)
-        if info and info.addresses:
-            ip = socket.inet_ntoa(info.addresses[0])
-            port = info.port
-            self.services.append((ip, port))
+        if info:
+            ip = info.parsed_addresses()[0] if info.parsed_addresses() else info.server
+            self.hosts.append((ip, info.port))
+    def update_service(self, *args): pass
+    def remove_service(self, *args): pass
 
-def descobrir_servidor(timeout=2):
-    zeroconf = Zeroconf()
+def discover(timeout=4):
+    if not ZEROCONF:
+        return []
     listener = PSChatListener()
-    browser = ServiceBrowser(zeroconf, "_pschat._tcp.local.", listener)
-    print("🔍 Procurando servidor PS.Chat na rede...")
-    import time
+    zc = Zeroconf()
+    ServiceBrowser(zc, "_pschat._tcp.local.", listener)
     time.sleep(timeout)
-    zeroconf.close()
-    if listener.services:
-        ip, port = listener.services[0]
-        return f"http://{ip}:{port}"
-    return None
-
-def is_termux():
-    return "/data/data/com.termux" in sys.prefix or "com.termux" in sys.executable
-
-def abrir_url(url):
-    if is_termux():
-        try:
-            subprocess.run(["termux-open-url", url], check=True)
-            return True
-        except:
-            pass
-    try:
-        webbrowser.open(url)
-        return True
-    except:
-        return False
+    zc.close()
+    return listener.hosts
 
 def main():
-    print("\n" + "=" * 40)
-    print("👾 PS.CHAT – CLIENTE COM DESCOBERTA")
-    print("=" * 40)
-
-    url_base = descobrir_servidor()
-    if url_base:
-        print(f"✅ Servidor encontrado: {url_base}")
+    banner()
+    hosts = discover()
+    if hosts:
+        ip, port = hosts[0]
+        log(f"Servidor encontrado: {ip}:{port}", "ok")
     else:
-        print("⚠️ Descoberta automática falhou. Digite os dados manualmente.")
-        ip = input("📡 IP do servidor: ").strip()
-        if not ip:
-            print("❌ IP não informado.")
-            return
-        url_base = f"http://{ip}:5000"
+        log("Nenhum servidor via mDNS.", "warn")
+        ip = input(N + "IP do servidor: " + R).strip()
+        port = input(N + "Porta [5000]: " + R).strip() or "5000"
+        port = int(port)
 
-    token = input("🔑 Token da sala: ").strip()
-    if not token:
-        print("❌ Token não informado.")
-        return
+    url = f"http://{ip}:{port}"
+    sio = socketio.Client()
+    alive = True
+    token = ""
+    username = ""
 
-    url_sala = f"{url_base}/sala/{token}"
-    print(f"\n🌐 Abrindo: {url_sala}")
-    if abrir_url(url_sala):
-        print("✅ Navegador aberto. Escolha um nome e converse.")
-    else:
-        print(f"❌ Não foi possível abrir o navegador. Acesse manualmente: {url_sala}")
+    @sio.event
+    def connect():
+        nonlocal token, username
+        log("Conectado!", "ok")
+        token = input(N + "Token da sala: " + R).strip()
+        username = input(N + "Seu nome: " + R).strip() or "Anônimo"
+        sio.emit('entrar', {'token': token, 'username': username})
 
-    input("\n🔚 Pressione ENTER para sair...")
+    @sio.on('mensagem')
+    def on_msg(data):
+        user = data.get('user', '')
+        text = data.get('text', '')
+        ts = data.get('timestamp', '')
+        if user.startswith('⚡'):
+            print(D + f"  {text}" + R)
+        elif user == username:
+            print(G + f"\n▸ {user}: {text}  {D}{ts}{R}")
+        else:
+            print(N + f"\n▸ {user}: {text}  {D}{ts}{R}")
+        sys.stdout.write(P + ">>> " + R)
+        sys.stdout.flush()
 
-if __name__ == "__main__":
-    main()
+    @sio.on('erro')
+    def on_err(data):
+        log(data.get('mensagem', 'Erro'), "err")
+
+    @sio.event
+    def disconnect():
+        nonlocal alive
+        log("Conexão encerrada.", "err")
+        alive = False
+
+    def input_loop():
+        nonlocal alive
+        while alive:
+            try:
+                msg = input(P + ">>> " + R).strip()
+            except:
+                alive = False
+                break
+            if msg.lower() == '/sair':
+                alive = False
+                sio.disconnect()
+                break
+            elif msg:
+                sio.emit('mensagem', {
+                    'token': token,
+                    'text': msg,
+                    'timestamp': datetime.now().isoformat()
+                })
+
+    try:
+        sio.connect(url, wait_timeout=10)
+    except Exception as e:
+        log(f"Falha ao conectar: {e}", "err")
+        sys.exit(1)
+
+    t = threading.Thread(target=input_loop, daemon=True)
+    t.start()
+    while alive:
+        time.sleep(0.5)
+    sio.disconnect()
+    log("Chat encerrado.", "info")
+
+if __name__ == '__main__':
+    try:
+        main()
+    except KeyboardInterrupt:
+        print("\n" + D + "Encerrado." + R)
