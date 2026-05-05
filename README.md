@@ -182,6 +182,6 @@ Distribuído sob a licença MIT. Veja LICENSE para mais informações.
 
 ---
 
-Desenvolvido por PeekSecurity – Acesso rápido e simples.
+**Desenvolvido por PeekSecurity – Acesso rápido e simples.**
 
 ---
