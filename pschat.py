@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 #
 #  PS.Chat — Comunicação offline segura com E2EE
 #  Versão 2.2.9 (Server/Client)
