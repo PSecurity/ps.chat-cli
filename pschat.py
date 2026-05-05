@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-PS.Chat CLI v2.0 – E2EE + Admin autenticado + Verificação de destinatário
+PS.Chat CLI v2.0 – E2EE + Admin + Fluxo de entrada corrigido
 """
 
 import sys, os, time, threading, subprocess, json, base64, hashlib, random, string
@@ -53,7 +53,7 @@ N = "\033[38;5;177m"
 D = "\033[38;5;96m"
 G = "\033[38;5;48m"
 E = "\033[38;5;203m"
-Y = "\033[38;5;228m"  # ouro para admin
+Y = "\033[38;5;228m"
 
 CONFIG_DIR = os.path.expanduser("~/.pschat")
 KEY_FILE = os.path.join(CONFIG_DIR, "keys.json")
@@ -134,10 +134,7 @@ def decrypt_message(encrypted, sender_pub_pem, sender_sign_pub_pem, recipient_pr
     sender_sign_pub = serialization.load_pem_public_key(base64.b64decode(sender_sign_pub_pem))
     ciphertext = base64.b64decode(encrypted['ciphertext'])
     signature = base64.b64decode(encrypted['signature'])
-    try:
-        sender_sign_pub.verify(signature, ciphertext)
-    except InvalidSignature:
-        raise ValueError("Assinatura inválida!")
+    sender_sign_pub.verify(signature, ciphertext)
     sender_pub = serialization.load_pem_public_key(base64.b64decode(sender_pub_pem))
     shared_key = recipient_priv.exchange(sender_pub)
     derived_key = hashlib.sha256(shared_key).digest()
@@ -226,7 +223,9 @@ def main():
     token = ""
     if not anonymous:
         username = ""
-    is_admin = False  # novo
+    is_admin = False
+    # Armazenar senha_admin para reenvio
+    saved_admin_pass = ""
 
     logging_active = False
     log_password = None
@@ -235,23 +234,21 @@ def main():
 
     @sio.event
     def connect():
-        nonlocal token, username
+        nonlocal token, username, saved_admin_pass
         log("Conectado!", "ok")
         token = input(N + "Token da sala: " + R).strip()
-
-        # Perguntar senha do admin (opcional) logo após o token
-        senha_admin = input(Y + "Senha de admin (Enter se não for admin): " + R).strip() if not anonymous else ''
-
         if not anonymous:
+            saved_admin_pass = input(Y + "Senha de admin (Enter se não for admin): " + R).strip()
             username = input(N + "Seu nome: " + R).strip() or "Anônimo"
-
+        else:
+            saved_admin_pass = ""
         sio.emit('entrar', {
             'token': token,
             'username': username,
             'pubkey': pub_pem,
             'sign_pubkey': sign_pub_pem,
-            'senha': '',                # senha da sala será pedida se necessário
-            'senha_admin': senha_admin
+            'senha': '',
+            'senha_admin': saved_admin_pass
         })
 
     @sio.on('admin_auth')
@@ -264,7 +261,8 @@ def main():
     @sio.on('erro')
     def on_err(data):
         msg = data.get('mensagem', 'Erro')
-        if 'Senha da sala' in msg:
+        tipo = data.get('tipo')
+        if tipo == 'senha_sala' or 'Senha da sala' in msg:
             senha = input(N + "Senha da sala: " + R).strip()
             sio.emit('entrar', {
                 'token': token,
@@ -272,7 +270,7 @@ def main():
                 'pubkey': pub_pem,
                 'sign_pubkey': sign_pub_pem,
                 'senha': senha,
-                'senha_admin': ''  # já foi enviado antes, mas não repetimos
+                'senha_admin': saved_admin_pass   # reenviar credenciais de admin
             })
         else:
             log(msg, "err")
@@ -319,7 +317,7 @@ def main():
                     prefix = "⚡ efêmero"
                 user_display = data['user']
                 if data.get('admin'):
-                    user_display = Y + "👑 " + user_display + R  # destaque ouro
+                    user_display = Y + "👑 " + user_display + R
                 print(N + f"\n▸ {user_display} ({prefix}): {txt}" + R)
                 if logging_active:
                     log_messages.append(f"{data['user']}: {txt}")
