@@ -118,7 +118,7 @@ Para que a descoberta funcione:
 ```bash
 pkg update && pkg upgrade
 pkg install git python
-git clone https://github.com/seu-usuario/ps.chat-client.git
+git clone https://github.com/PSecurity/ps.chat-client
 cd ps.chat-client
 pip install zeroconf
 python ps.chat-cli.py
@@ -128,7 +128,7 @@ python ps.chat-cli.py
 
 ```bash
 pkg install bash
-curl -O https://raw.githubusercontent.com/seu-usuario/ps.chat-client/main/ps.chat-lite.sh
+curl -O https://raw.githubusercontent.com/PSecurity/ps.chat-client/main/ps.chat-lite.sh
 bash ps.chat-lite.sh
 ```
 
