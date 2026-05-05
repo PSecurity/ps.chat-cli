@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-PS.Chat CLI v2.2.3 – E2EE + chave de sala automática + exibição correta do nome
+PS.Chat CLI v2.2.4 – E2EE + chave automática + correção de travamentos
 """
 
 import sys, os, time, threading, subprocess, json, base64, hashlib, random, string, uuid, readline
@@ -36,19 +36,11 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.exceptions import InvalidSignature, InvalidTag
 
-# ---------- Cores ANSI (identidade PeekSecurity) ----------
-R = "\033[0m"
-B = "\033[1m"
-P = "\033[38;5;135m"   # roxo principal
-N = "\033[38;5;177m"   # roxo claro
-D = "\033[38;5;96m"    # dim
-G = "\033[38;5;48m"    # verde
-E = "\033[38;5;203m"   # vermelho
-Y = "\033[38;5;228m"   # ouro (admin)
-M = "\033[38;5;141m"   # roxo médio (moderador)
-C = "\033[38;5;51m"    # ciano (menções)
+# ---------- Cores ----------
+R = "\033[0m"; B = "\033[1m"; P = "\033[38;5;135m"; N = "\033[38;5;177m"
+D = "\033[38;5;96m"; G = "\033[38;5;48m"; E = "\033[38;5;203m"
+Y = "\033[38;5;228m"; M = "\033[38;5;141m"; C = "\033[38;5;51m"
 
-# ---------- Diretórios ----------
 CONFIG_DIR = os.path.expanduser("~/.pschat")
 KEY_FILE = os.path.join(CONFIG_DIR, "keys.json")
 DEVICE_ID_FILE = os.path.join(CONFIG_DIR, "device_id")
@@ -407,8 +399,14 @@ class ChatClient:
             ip, port = hosts[0]
             log(f"Servidor: {ip}:{port}", "ok")
         else:
-            ip = input(N + "IP do servidor: " + R).strip()
-            port = int(input(N + "Porta [5000]: " + R).strip() or "5000")
+            while True:
+                ip = input(N + "IP do servidor: " + R).strip()
+                port = input(N + "Porta [5000]: " + R).strip() or "5000"
+                if not ip or not port.isdigit():
+                    print(E + "IP ou porta inválidos. Tente novamente." + R)
+                    continue
+                port = int(port)
+                break
 
         try:
             self.sio.connect(f"http://{ip}:{port}", wait_timeout=15)
@@ -448,14 +446,17 @@ class ChatClient:
             while self.alive:
                 try:
                     raw = input(P + ">>> " + R).strip()
-                except: break
+                except (EOFError, KeyboardInterrupt):
+                    break
                 if not raw: continue
                 if self.muted and not raw.startswith('/'):
                     log("Silenciado.", "warn"); continue
 
                 # Comandos
                 if raw == '/sair':
-                    self.alive = False; self.sio.disconnect(); break
+                    self.alive = False
+                    self.sio.disconnect()
+                    break
                 elif raw == '/sala':
                     self.sio.emit('sala_info', {'token': self.token})
                 elif raw == '/clear':
@@ -511,20 +512,28 @@ class ChatClient:
                     if len(parts) < 2: continue
                     subcmd = parts[1].lower()
                     if subcmd == 'on' and len(parts) >= 3:
-                        self.log_password = parts[2]; self.logging_active = True; self.log_messages = []
+                        self.log_password = parts[2]
+                        self.logging_active = True
+                        self.log_messages = []
                         self.log_filename = os.path.join(HISTORY_DIR, f"{self.token}.log.enc")
                         os.makedirs(HISTORY_DIR, exist_ok=True)
+                        log("Histórico ativado.", "ok")
                     elif subcmd == 'off':
                         if self.logging_active and self.log_messages:
                             content = "\n".join(self.log_messages[-200:])
                             key = hashlib.sha256(self.log_password.encode()).digest()
                             aeslog = AESGCM(key); nonce = os.urandom(12)
                             ctext = aeslog.encrypt(nonce, content.encode(), None)
-                            with open(self.log_filename,'w') as f: f.write(json.dumps({'nonce':base64.b64encode(nonce).decode(), 'ciphertext':base64.b64encode(ctext).decode()}))
-                        self.logging_active = False; self.log_password = None
+                            with open(self.log_filename,'w') as f:
+                                f.write(json.dumps({'nonce':base64.b64encode(nonce).decode(), 'ciphertext':base64.b64encode(ctext).decode()}))
+                            log("Histórico salvo e desativado.", "ok")
+                        else:
+                            log("Nenhuma mensagem para salvar.", "warn")
+                        self.logging_active = False
+                        self.log_password = None
                     elif subcmd == 'show':
                         if not self.log_filename or not os.path.exists(self.log_filename):
-                            log("Nenhum log.", "warn")
+                            log("Nenhum log encontrado.", "warn")
                         else:
                             pwd = input("Senha do log: ").strip()
                             with open(self.log_filename) as f: d = json.load(f)
@@ -567,11 +576,14 @@ class ChatClient:
                     else:
                         log("Aguardando chave de sala...", "warn")
 
-        threading.Thread(target=input_loop, daemon=True).start()
-        while self.alive: time.sleep(0.5)
+        input_thread = threading.Thread(target=input_loop, daemon=True)
+        input_thread.start()
+        while self.alive:
+            time.sleep(0.5)
         self.sio.disconnect()
         log("Chat encerrado.", "info")
-        os._exit(0)
+        # Garantir que o processo encerre completamente
+        sys.exit(0)
 
 if __name__ == '__main__':
     client = ChatClient()
@@ -579,4 +591,4 @@ if __name__ == '__main__':
         client.run()
     except KeyboardInterrupt:
         print("\n" + D + "Encerrado." + R)
-        os._exit(0)
+        sys.exit(0)
