@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """
-PS.Chat CLI — Cliente terminal seguro com E2EE
+PS.Chat CLI — Cliente terminal seguro com E2EE + Assinatura
 """
 
 import sys, os, time, threading, subprocess, json, base64, hashlib
 from datetime import datetime
 
-# Instalação automática de dependências
 def ensure_dependencies():
     deps = {
         "socketio": "python-socketio[client]",
@@ -37,7 +36,9 @@ import socketio
 from zeroconf import ServiceBrowser, Zeroconf, ServiceStateChange
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from cryptography.exceptions import InvalidSignature
 
 # Cores ANSI
 R = "\033[0m"
@@ -68,10 +69,16 @@ def load_or_create_keys():
             data = json.load(f)
             priv = serialization.load_pem_private_key(base64.b64decode(data['private']), password=None)
             pub  = serialization.load_pem_public_key(base64.b64decode(data['public']))
-            return priv, pub
+            sign_priv = serialization.load_pem_private_key(base64.b64decode(data['sign_private']), password=None)
+            sign_pub  = serialization.load_pem_public_key(base64.b64decode(data['sign_public']))
+            return priv, pub, sign_priv, sign_pub
     os.makedirs(CONFIG_DIR, exist_ok=True)
+    # Par de criptografia (X25519)
     priv = X25519PrivateKey.generate()
     pub  = priv.public_key()
+    # Par de assinatura (Ed25519)
+    sign_priv = Ed25519PrivateKey.generate()
+    sign_pub  = sign_priv.public_key()
     data = {
         'private': base64.b64encode(
             priv.private_bytes(encoding=serialization.Encoding.PEM,
@@ -81,34 +88,54 @@ def load_or_create_keys():
         'public': base64.b64encode(
             pub.public_bytes(encoding=serialization.Encoding.PEM,
                              format=serialization.PublicFormat.SubjectPublicKeyInfo)
+        ).decode(),
+        'sign_private': base64.b64encode(
+            sign_priv.private_bytes(encoding=serialization.Encoding.PEM,
+                                    format=serialization.PrivateFormat.PKCS8,
+                                    encryption_algorithm=serialization.NoEncryption())
+        ).decode(),
+        'sign_public': base64.b64encode(
+            sign_pub.public_bytes(encoding=serialization.Encoding.PEM,
+                                  format=serialization.PublicFormat.SubjectPublicKeyInfo)
         ).decode()
     }
     with open(KEY_FILE, 'w') as f:
         json.dump(data, f, indent=2)
     try: os.chmod(KEY_FILE, 0o600)
     except: pass
-    return priv, pub
+    return priv, pub, sign_priv, sign_pub
 
-def encrypt_message(plaintext: str, recipient_pub_pem: str, sender_priv: X25519PrivateKey) -> dict:
+def encrypt_message(plaintext: str, recipient_pub_pem: str, sender_priv: X25519PrivateKey, sign_priv: Ed25519PrivateKey) -> dict:
     recipient_pub = serialization.load_pem_public_key(base64.b64decode(recipient_pub_pem))
     shared_key = sender_priv.exchange(recipient_pub)
     derived_key = hashlib.sha256(shared_key).digest()
     aesgcm = AESGCM(derived_key)
     nonce = os.urandom(12)
     ciphertext = aesgcm.encrypt(nonce, plaintext.encode(), None)
+    # Assinar o ciphertext (ou plaintext? assinar o ciphertext garante integridade do conteúdo encriptado)
+    signature = sign_priv.sign(ciphertext)
     return {
         'nonce': base64.b64encode(nonce).decode(),
         'ciphertext': base64.b64encode(ciphertext).decode(),
+        'signature': base64.b64encode(signature).decode(),
         'recipient_pub': recipient_pub_pem
     }
 
-def decrypt_message(encrypted: dict, sender_pub_pem: str, recipient_priv: X25519PrivateKey) -> str:
+def decrypt_message(encrypted: dict, sender_pub_pem: str, sender_sign_pub_pem: str, recipient_priv: X25519PrivateKey) -> str:
+    # Verificar assinatura
+    sender_sign_pub = serialization.load_pem_public_key(base64.b64decode(sender_sign_pub_pem))
+    ciphertext = base64.b64decode(encrypted['ciphertext'])
+    signature = base64.b64decode(encrypted['signature'])
+    try:
+        sender_sign_pub.verify(signature, ciphertext)
+    except InvalidSignature:
+        raise ValueError("Assinatura inválida! Mensagem pode ser forjada.")
+
     sender_pub = serialization.load_pem_public_key(base64.b64decode(sender_pub_pem))
     shared_key = recipient_priv.exchange(sender_pub)
     derived_key = hashlib.sha256(shared_key).digest()
     aesgcm = AESGCM(derived_key)
     nonce = base64.b64decode(encrypted['nonce'])
-    ciphertext = base64.b64decode(encrypted['ciphertext'])
     plaintext = aesgcm.decrypt(nonce, ciphertext, None)
     return plaintext.decode()
 
@@ -136,12 +163,16 @@ def discover(timeout=4):
 
 def main():
     banner()
-    priv, pub = load_or_create_keys()
+    priv, pub, sign_priv, sign_pub = load_or_create_keys()
     pub_pem = base64.b64encode(
         pub.public_bytes(encoding=serialization.Encoding.PEM,
                          format=serialization.PublicFormat.SubjectPublicKeyInfo)
     ).decode()
-    log("Chave pública carregada.", "ok")
+    sign_pub_pem = base64.b64encode(
+        sign_pub.public_bytes(encoding=serialization.Encoding.PEM,
+                              format=serialization.PublicFormat.SubjectPublicKeyInfo)
+    ).decode()
+    log("Chaves carregadas.", "ok")
 
     hosts = discover()
     if hosts:
@@ -155,40 +186,60 @@ def main():
     url = f"http://{ip}:{port}"
     sio = socketio.Client()
     alive = True
-    peers_keys = {}
+    peers = {}          # username -> {pubkey, sign_pubkey}
     token = ""
     username = ""
 
-    # Handlers devem ser registrados ANTES da conexão
     @sio.event
     def connect():
         nonlocal token, username
         log("Conectado!", "ok")
         token = input(N + "Token da sala: " + R).strip()
         username = input(N + "Seu nome: " + R).strip() or "Anônimo"
-        # Envia chave pública e entra na sala
-        sio.emit('entrar', {'token': token, 'username': username, 'pubkey': pub_pem})
+        # Envia chaves públicas (criptografia e assinatura)
+        sio.emit('entrar', {
+            'token': token,
+            'username': username,
+            'pubkey': pub_pem,
+            'sign_pubkey': sign_pub_pem
+        })
 
     @sio.on('mensagem')
     def on_msg(data):
-        # Ignorar mensagens do próprio usuário (podem ser eco)
         if data.get('user') == username:
             return
-        # Se contém 'pubkey', é anúncio de chave
-        if 'pubkey' in data:
-            peers_keys[data['user']] = data['pubkey']
-            log(f"Chave de {data['user']} recebida.", "ok")
+        # Atualizar chaves se for anúncio
+        if 'pubkey' in data and 'sign_pubkey' in data:
+            peers[data['user']] = {
+                'pubkey': data['pubkey'],
+                'sign_pubkey': data['sign_pubkey']
+            }
+            log(f"Chaves de {data['user']} atualizadas.", "ok")
             return
-        # Se for mensagem criptografada
-        if 'ciphertext' in data:
+        # Mensagem criptografada
+        if 'ciphertext' in data and 'signature' in data:
+            peer_info = peers.get(data['user'])
+            if not peer_info:
+                log(f"Chave de {data['user']} não disponível.", "err")
+                return
             try:
-                plain = decrypt_message(data, peers_keys.get(data['user']), priv)
+                plain = decrypt_message(data, peer_info['pubkey'], peer_info['sign_pubkey'], priv)
                 print(N + f"\n▸ {data['user']} (seguro): {plain}" + R)
-            except Exception as e:
-                log(f"Falha ao descriptografar de {data['user']}: {e}", "err")
+            except ValueError as e:
+                log(f"Falha de segurança: {e}", "err")
+                return
         else:
-            # Mensagem normal (admin/web)
             print(D + f"\n▸ {data['user']}: {data.get('text','')}" + R)
+        sys.stdout.write(P + ">>> " + R)
+        sys.stdout.flush()
+
+    @sio.on('sala_info')
+    def on_sala_info(data):
+        members = data.get('members', [])
+        print(N + "\n👥 Participantes:" + R)
+        for m in members:
+            key_status = "🔑" if m.get('has_pubkey') else "❌"
+            print(f"  {key_status} {m['username']}")
         sys.stdout.write(P + ">>> " + R)
         sys.stdout.flush()
 
@@ -202,7 +253,6 @@ def main():
         log("Conexão encerrada.", "err")
         alive = False
 
-    # Tenta conectar
     try:
         sio.connect(url, wait_timeout=15)
     except Exception as e:
@@ -221,18 +271,21 @@ def main():
                 alive = False
                 sio.disconnect()
                 break
+            elif msg.lower() == '/sala':
+                if token:
+                    sio.emit('sala_info', {'token': token})
+                else:
+                    log("Você ainda não entrou em uma sala.", "warn")
             elif msg and token:
-                if peers_keys:
-                    # Envia criptografado para cada peer
-                    for peer, peer_pub in peers_keys.items():
-                        enc = encrypt_message(msg, peer_pub, priv)
+                if peers:
+                    for peer, info in peers.items():
+                        enc = encrypt_message(msg, info['pubkey'], priv, sign_priv)
                         sio.emit('mensagem', {
                             'token': token,
                             'user': username,
                             **enc
                         })
                 else:
-                    # Fallback texto plano (compatível com admin)
                     sio.emit('mensagem', {
                         'token': token,
                         'text': msg,
