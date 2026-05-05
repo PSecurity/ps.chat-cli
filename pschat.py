@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-PS.Chat CLI v2.0 – E2EE + efêmeras + log criptografado + senha de sala + arquivos + anônimo
+PS.Chat CLI v2.0 – E2EE + efêmeras + log + arquivos + anônimo + resolução de chaves
 """
 
 import sys, os, time, threading, subprocess, json, base64, hashlib, random, string
@@ -46,7 +46,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
-from cryptography.exceptions import InvalidSignature
+from cryptography.exceptions import InvalidSignature, InvalidTag
 
 # Cores
 R = "\033[0m"
@@ -221,7 +221,7 @@ def main():
         log(f"Identidade anônima: {username}", "ok")
     else:
         log("Chaves carregadas.", "ok")
-        username = None  # será pedido depois
+        username = None
 
     hosts = discover()
     if hosts:
@@ -240,11 +240,10 @@ def main():
     if not anonymous:
         username = ""
 
-    # Controle de log local
     logging_active = False
     log_password = None
     log_filename = None
-    log_messages = []  # armazena as últimas enquanto ativo
+    log_messages = []
 
     @sio.event
     def connect():
@@ -253,27 +252,18 @@ def main():
         token = input(N + "Token da sala: " + R).strip()
         if not anonymous:
             username = input(N + "Seu nome: " + R).strip() or "Anônimo"
-        # Pergunta senha da sala se necessário (vamos tentar entrar com senha vazia; se falhar, pedimos)
-        senha = ''
-        while True:
-            # Tenta entrar com chaves e senha
-            sio.emit('entrar', {
-                'token': token,
-                'username': username,
-                'pubkey': pub_pem,
-                'sign_pubkey': sign_pub_pem,
-                'senha': senha
-            })
-            # A resposta de erro virá via evento 'erro'. Se não houver erro, prossegue.
-            # Vamos aguardar um pouco e verificar se fomos desconectados.
-            break  # O evento 'erro' tratará caso necessário
+        sio.emit('entrar', {
+            'token': token,
+            'username': username,
+            'pubkey': pub_pem,
+            'sign_pubkey': sign_pub_pem,
+            'senha': ''
+        })
 
     @sio.on('erro')
     def on_err(data):
         msg = data.get('mensagem', 'Erro')
         if 'Senha' in msg:
-            # Se for erro de senha, solicita novamente
-            nonlocal token
             s = input(N + "Senha da sala: " + R).strip()
             sio.emit('entrar', {
                 'token': token,
@@ -299,7 +289,6 @@ def main():
     def on_msg(data):
         if data.get('user') == username:
             return
-        # Trata arquivos recebidos
         if data.get('type') == 'file':
             filename = data.get('filename', 'arquivo')
             filedata = base64.b64decode(data['filedata'])
@@ -312,11 +301,11 @@ def main():
             sys.stdout.flush()
             return
 
-        # Mensagens criptografadas
         if 'ciphertext' in data and 'signature' in data:
             peer = peers.get(data['user'])
             if not peer:
-                log(f"Chave de {data['user']} indisponível.", "err")
+                sio.emit('solicitar_chave', {'token': token, 'username': data['user']})
+                log(f"Chave de {data['user']} indisponível. Solicitei atualização.", "warn")
                 return
             try:
                 txt = decrypt_message(data, peer['pubkey'], peer['sign_pubkey'], priv)
@@ -326,8 +315,10 @@ def main():
                 print(N + f"\n▸ {data['user']} ({prefix}): {txt}" + R)
                 if logging_active:
                     log_messages.append(f"{data['user']}: {txt}")
-            except ValueError as e:
-                log(f"Falha de segurança: {e}", "err")
+            except (InvalidSignature, InvalidTag, ValueError, Exception) as e:
+                # Provavelmente a chave está desatualizada, solicitar nova
+                sio.emit('solicitar_chave', {'token': token, 'username': data['user']})
+                log(f"Falha ao descriptografar mensagem de {data['user']} – solicitando chave atualizada.", "err")
                 return
         elif data.get('type') == 'system':
             print(D + f"\n  {data['text']}" + R)
@@ -361,7 +352,6 @@ def main():
         log(f"Falha ao conectar: {e}", "err")
         sys.exit(1)
 
-    # Thread de input com todos os comandos
     def input_loop():
         nonlocal alive, logging_active, log_password, log_filename, log_messages
         while alive:
@@ -372,7 +362,6 @@ def main():
                 break
             if not raw:
                 continue
-            # Comandos
             if raw.lower() == '/sair':
                 alive = False
                 sio.disconnect()
@@ -457,8 +446,7 @@ def main():
                         log("Histórico criptografado ativado.", "ok")
                 elif subcmd == 'off':
                     if logging_active and log_messages:
-                        # Salva antes de desativar
-                        content = "\n".join(log_messages[-200:])  # últimas 200
+                        content = "\n".join(log_messages[-200:])
                         enc_content = encrypt_file(content, log_password)
                         with open(log_filename, 'w') as f:
                             f.write(enc_content)
@@ -480,7 +468,6 @@ def main():
                 else:
                     log("Comando /log inválido. Use on/off/show.", "warn")
             else:
-                # Mensagem normal
                 if token:
                     if peers:
                         for peer, info in peers.items():
@@ -498,22 +485,16 @@ def main():
                         })
 
     threading.Thread(target=input_loop, daemon=True).start()
-
-    # Loop principal – aguarda até que alive se torne False
     while alive:
         time.sleep(0.5)
-
-    # Ao sair, salva log se ativo
     if logging_active and log_messages:
         content = "\n".join(log_messages[-200:])
         enc_content = encrypt_file(content, log_password)
         with open(log_filename, 'w') as f:
             f.write(enc_content)
         log("Histórico salvo.", "ok")
-
     sio.disconnect()
     log("Chat encerrado.", "info")
-    # Força saída mesmo que a thread de input esteja bloqueada
     os._exit(0)
 
 if __name__ == '__main__':
