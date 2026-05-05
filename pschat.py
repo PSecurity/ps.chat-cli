@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-PS.Chat CLI v2.2.4 – E2EE + chave automática + correção de travamentos
+PS.Chat CLI v2.2.6 – E2EE + comandos de moderação + verify funcional
 """
 
 import sys, os, time, threading, subprocess, json, base64, hashlib, random, string, uuid, readline
@@ -153,7 +153,8 @@ def decrypt_room_message(encrypted, room_key, sender_sign_pub_pem):
 
 # ---------- Autocompletar ----------
 COMMANDS = ['/sair','/sala','/sumir','/send','/log','/export','/fingerprint',
-            '/kick','/mute','/unmute','/ban','/verify','/dm','/filter','/clear','/help']
+            '/kick','/mute','/unmute','/ban','/verify','/dm','/filter','/clear','/help',
+            '/promote','/demote']
 def completer(text, state):
     options = [c for c in COMMANDS if c.startswith(text)]
     if state < len(options): return options[state]
@@ -201,7 +202,6 @@ class ChatClient:
         self.device_id = get_device_id()
         self._register_handlers()
 
-    # ---------- Handlers de eventos ----------
     def _register_handlers(self):
         sio = self.sio
 
@@ -361,7 +361,6 @@ class ChatClient:
             self.alive = False
             log("Conexão encerrada.", "err")
 
-    # ---------- Distribuição de chave ----------
     def _send_room_key_to(self, dest):
         if not self.room_key: return
         peer = self.peers.get(dest)
@@ -379,7 +378,6 @@ class ChatClient:
         for peer in self.peers:
             self._send_room_key_to(peer)
 
-    # ========== EXECUÇÃO PRINCIPAL ==========
     def run(self):
         banner()
 
@@ -441,7 +439,6 @@ class ChatClient:
                 self.generate_and_distribute_room_key()
         threading.Thread(target=generate_if_no_key, daemon=True).start()
 
-        # ---------- Loop de entrada ----------
         def input_loop():
             while self.alive:
                 try:
@@ -454,16 +451,14 @@ class ChatClient:
 
                 # Comandos
                 if raw == '/sair':
-                    self.alive = False
-                    self.sio.disconnect()
-                    break
+                    self.alive = False; self.sio.disconnect(); break
                 elif raw == '/sala':
                     self.sio.emit('sala_info', {'token': self.token})
                 elif raw == '/clear':
                     os.system('clear' if os.name != 'nt' else 'cls')
                     banner()
                 elif raw == '/help':
-                    print(N + "  /sala /sumir /send /log /export /fingerprint /kick /mute /unmute /ban /verify /dm /filter /clear /help /sair")
+                    print(N + "  /sala /sumir /send /log /export /fingerprint /kick /mute /unmute /ban /promote /demote /verify /dm /filter /clear /help /sair")
                 elif raw.startswith('/sumir '):
                     msg = raw[7:]
                     if self.room_key:
@@ -487,6 +482,10 @@ class ChatClient:
                     self.sio.emit('unmute_user', {'token':self.token, 'username':raw[8:].strip()})
                 elif raw.startswith('/ban ') and (self.is_admin or self.is_moderator):
                     self.sio.emit('ban_user', {'token':self.token, 'username':raw[5:].strip()})
+                elif raw.startswith('/promote ') and (self.is_admin or self.is_moderator):
+                    self.sio.emit('promote_user', {'token':self.token, 'username':raw[9:].strip()})
+                elif raw.startswith('/demote ') and (self.is_admin or self.is_moderator):
+                    self.sio.emit('demote_user', {'token':self.token, 'username':raw[8:].strip()})
                 elif raw.startswith('/verify '):
                     target = raw[8:].strip()
                     if target in self.peers:
@@ -512,28 +511,20 @@ class ChatClient:
                     if len(parts) < 2: continue
                     subcmd = parts[1].lower()
                     if subcmd == 'on' and len(parts) >= 3:
-                        self.log_password = parts[2]
-                        self.logging_active = True
-                        self.log_messages = []
+                        self.log_password = parts[2]; self.logging_active = True; self.log_messages = []
                         self.log_filename = os.path.join(HISTORY_DIR, f"{self.token}.log.enc")
                         os.makedirs(HISTORY_DIR, exist_ok=True)
-                        log("Histórico ativado.", "ok")
                     elif subcmd == 'off':
                         if self.logging_active and self.log_messages:
                             content = "\n".join(self.log_messages[-200:])
                             key = hashlib.sha256(self.log_password.encode()).digest()
                             aeslog = AESGCM(key); nonce = os.urandom(12)
                             ctext = aeslog.encrypt(nonce, content.encode(), None)
-                            with open(self.log_filename,'w') as f:
-                                f.write(json.dumps({'nonce':base64.b64encode(nonce).decode(), 'ciphertext':base64.b64encode(ctext).decode()}))
-                            log("Histórico salvo e desativado.", "ok")
-                        else:
-                            log("Nenhuma mensagem para salvar.", "warn")
-                        self.logging_active = False
-                        self.log_password = None
+                            with open(self.log_filename,'w') as f: f.write(json.dumps({'nonce':base64.b64encode(nonce).decode(), 'ciphertext':base64.b64encode(ctext).decode()}))
+                        self.logging_active = False; self.log_password = None
                     elif subcmd == 'show':
                         if not self.log_filename or not os.path.exists(self.log_filename):
-                            log("Nenhum log encontrado.", "warn")
+                            log("Nenhum log.", "warn")
                         else:
                             pwd = input("Senha do log: ").strip()
                             with open(self.log_filename) as f: d = json.load(f)
@@ -582,7 +573,6 @@ class ChatClient:
             time.sleep(0.5)
         self.sio.disconnect()
         log("Chat encerrado.", "info")
-        # Garantir que o processo encerre completamente
         sys.exit(0)
 
 if __name__ == '__main__':
