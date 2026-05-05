@@ -8,7 +8,12 @@ from datetime import datetime
 
 def ensure_dependencies():
     deps = {"socketio": "python-socketio[client]", "zeroconf": "zeroconf", "cryptography": "cryptography"}
-    missing = [pkg for mod, pkg in deps.items() if not __import__(mod)]
+    missing = []
+    for mod, pkg in deps.items():
+        try:
+            __import__(mod)
+        except ImportError:
+            missing.append(pkg)
     if missing:
         print("🔧 Dependências faltando:", ", ".join(missing))
         ok = input("Instalar agora? [S/n]: ").strip().lower()
@@ -85,10 +90,24 @@ def load_or_create_keys(anonymous=False):
     sign_priv = Ed25519PrivateKey.generate()
     sign_pub = sign_priv.public_key()
     data = {
-        'private': base64.b64encode(priv.private_bytes(...)).decode(),
-        'public': base64.b64encode(pub.public_bytes(...)).decode(),
-        'sign_private': base64.b64encode(sign_priv.private_bytes(...)).decode(),
-        'sign_public': base64.b64encode(sign_pub.public_bytes(...)).decode()
+        'private': base64.b64encode(
+            priv.private_bytes(encoding=serialization.Encoding.PEM,
+                               format=serialization.PrivateFormat.PKCS8,
+                               encryption_algorithm=serialization.NoEncryption())
+        ).decode(),
+        'public': base64.b64encode(
+            pub.public_bytes(encoding=serialization.Encoding.PEM,
+                             format=serialization.PublicFormat.SubjectPublicKeyInfo)
+        ).decode(),
+        'sign_private': base64.b64encode(
+            sign_priv.private_bytes(encoding=serialization.Encoding.PEM,
+                                    format=serialization.PrivateFormat.PKCS8,
+                                    encryption_algorithm=serialization.NoEncryption())
+        ).decode(),
+        'sign_public': base64.b64encode(
+            sign_pub.public_bytes(encoding=serialization.Encoding.PEM,
+                                  format=serialization.PublicFormat.SubjectPublicKeyInfo)
+        ).decode()
     }
     with open(KEY_FILE, 'w') as f: json.dump(data, f, indent=2)
     os.chmod(KEY_FILE, 0o600)
@@ -145,7 +164,7 @@ def decrypt_room_message(encrypted, room_key, sender_sign_pub_pem):
 # ---------- Autocompletar ----------
 COMMANDS = ['/sair', '/sala', '/sumir', '/send', '/log', '/export', '/fingerprint',
             '/kick', '/mute', '/unmute', '/ban', '/unban', '/verify', '/dm',
-            '/filter', '/clear', '/help', '/sair']
+            '/filter', '/clear', '/help']
 def completer(text, state):
     options = [cmd for cmd in COMMANDS if cmd.startswith(text)]
     if state < len(options):
@@ -287,8 +306,7 @@ class ChatClient:
             if data.get('user') == self.username: return
             timestamp = datetime.now().strftime("[%H:%M]")
             # DM criptografada
-            if 'dm_target' in data or 'ciphertext' in data and not data.get('room_encrypted'):
-                # mensagem criptografada individualmente
+            if 'dm_target' in data or ('ciphertext' in data and not data.get('room_encrypted')):
                 peer = self.peers.get(data['user'])
                 if peer:
                     try:
@@ -379,8 +397,15 @@ class ChatClient:
         anon = input(N + "Entrar como anônimo? [s/N]: " + R).strip().lower()
         anonymous = anon == 's'
         self.priv, self.pub, self.sign_priv, self.sign_pub = load_or_create_keys(anonymous)
-        self.pub_pem = base64.b64encode(self.pub.public_bytes(...)).decode()
-        self.sign_pub_pem = base64.b64encode(self.sign_pub.public_bytes(...)).decode()
+        # linhas corrigidas abaixo
+        self.pub_pem = base64.b64encode(
+            self.pub.public_bytes(encoding=serialization.Encoding.PEM,
+                                  format=serialization.PublicFormat.SubjectPublicKeyInfo)
+        ).decode()
+        self.sign_pub_pem = base64.b64encode(
+            self.sign_pub.public_bytes(encoding=serialization.Encoding.PEM,
+                                       format=serialization.PublicFormat.SubjectPublicKeyInfo)
+        ).decode()
 
         if not anonymous:
             print(Y + f"🔑 Fingerprint: {fingerprint(self.pub_pem)}" + R)
@@ -388,24 +413,34 @@ class ChatClient:
         hosts = discover()
         if hosts:
             ip, port = hosts[0]
+            log(f"Servidor: {ip}:{port}", "ok")
         else:
             ip = input(N + "IP do servidor: " + R).strip()
             port = int(input(N + "Porta [5000]: " + R).strip() or "5000")
 
-        self.sio.connect(f"http://{ip}:{port}", wait_timeout=15)
+        try:
+            self.sio.connect(f"http://{ip}:{port}", wait_timeout=15)
+        except Exception as e:
+            log(f"Falha ao conectar: {e}", "err")
+            sys.exit(1)
 
         self.token = input(N + "Token da sala: " + R).strip()
         if anonymous:
             self.username = 'Anon_' + ''.join(random.choices(string.ascii_letters + string.digits, k=6))
+            self.saved_admin_pass = ''
         else:
-            self.saved_admin_pass = input(Y + "Senha de admin: " + R).strip()
+            self.saved_admin_pass = input(Y + "Senha de admin (Enter se não for admin): " + R).strip()
             self.username = input(N + "Seu nome: " + R).strip() or "Anônimo"
-        senha = input(N + "Senha da sala: " + R).strip()
+
+        senha_sala = input(N + "Senha da sala (Enter se não houver): " + R).strip()
 
         self.sio.emit('entrar', {
-            'token': self.token, 'username': self.username,
-            'pubkey': self.pub_pem, 'sign_pubkey': self.sign_pub_pem,
-            'senha': senha, 'senha_admin': self.saved_admin_pass
+            'token': self.token,
+            'username': self.username,
+            'pubkey': self.pub_pem,
+            'sign_pubkey': self.sign_pub_pem,
+            'senha': senha_sala,
+            'senha_admin': self.saved_admin_pass
         })
 
         if self.is_admin and not self.room_key:
@@ -421,7 +456,6 @@ class ChatClient:
                 if not raw: continue
                 if self.muted and not raw.startswith('/'):
                     log("Silenciado.", "warn"); continue
-                # Comandos
                 cmd = raw.lower().split()[0] if raw.startswith('/') else None
                 if raw == '/sair':
                     self.alive = False; self.sio.disconnect(); break
@@ -430,7 +464,7 @@ class ChatClient:
                 elif raw == '/clear':
                     os.system('clear'); print(banner())
                 elif raw == '/help':
-                    print(N + """  /sala /sumir /send /log /export /fingerprint /kick /mute /unmute /ban /unban /verify /dm /filter /clear /help /sair""")
+                    print(N + "  /sala /sumir /send /log /export /fingerprint /kick /mute /unmute /ban /unban /verify /dm /filter /clear /help /sair")
                 elif raw.startswith('/sumir '):
                     msg = raw[7:]
                     if self.room_key:
@@ -452,9 +486,6 @@ class ChatClient:
                     self.sio.emit('unmute_user', {'token':self.token, 'username':raw[8:].strip()})
                 elif raw.startswith('/ban ') and (self.is_admin or self.is_moderator):
                     self.sio.emit('ban_user', {'token':self.token, 'username':raw[5:].strip()})
-                elif raw.startswith('/unban '):
-                    # Remove localmente? Não, precisa enviar ao servidor. No momento não implementado.
-                    pass
                 elif raw.startswith('/verify '):
                     target = raw[8:].strip()
                     if target in self.peers:
@@ -477,26 +508,52 @@ class ChatClient:
                             print(C + f"[{datetime.now():%H:%M}] DM para {target}: {msg}" + R)
                 elif raw.startswith('/log '):
                     parts = raw.split()
-                    if parts[1] == 'on' and len(parts)>=3:
-                        self.log_password = parts[2]; self.logging_active = True; self.log_messages=[]
+                    if len(parts) < 2: continue
+                    subcmd = parts[1].lower()
+                    if subcmd == 'on' and len(parts) >= 3:
+                        self.log_password = parts[2]; self.logging_active = True; self.log_messages = []
                         self.log_filename = os.path.join(HISTORY_DIR, f"{self.token}.log.enc")
                         os.makedirs(HISTORY_DIR, exist_ok=True)
-                    elif parts[1] == 'off':
-                        if self.logging_active:
+                    elif subcmd == 'off':
+                        if self.logging_active and self.log_messages:
                             content = "\n".join(self.log_messages[-200:])
                             key = hashlib.sha256(self.log_password.encode()).digest()
                             aeslog = AESGCM(key); nonce = os.urandom(12)
                             ctext = aeslog.encrypt(nonce, content.encode(), None)
                             with open(self.log_filename,'w') as f: f.write(json.dumps({'nonce':base64.b64encode(nonce).decode(), 'ciphertext':base64.b64encode(ctext).decode()}))
-                        self.logging_active = False
-                    elif parts[1] == 'show':
-                        # ... (omitido por brevidade)
-                        pass
+                        self.logging_active = False; self.log_password = None
+                    elif subcmd == 'show':
+                        if not self.log_filename or not os.path.exists(self.log_filename):
+                            log("Nenhum log.", "warn")
+                        else:
+                            pwd = input("Senha do log: ").strip()
+                            with open(self.log_filename) as f: d = json.load(f)
+                            key = hashlib.sha256(pwd.encode()).digest(); aeslog = AESGCM(key)
+                            try:
+                                plain = aeslog.decrypt(base64.b64decode(d['nonce']), base64.b64decode(d['ciphertext']), None)
+                                print(plain.decode())
+                            except: log("Senha ou arquivo inválido.", "err")
                 elif raw == '/export':
-                    # ... (exportar histórico)
-                    pass
+                    if not self.log_filename or not os.path.exists(self.log_filename):
+                        log("Nenhum log salvo.", "warn")
+                    else:
+                        pwd = input("Senha do log: ").strip()
+                        with open(self.log_filename) as f: d = json.load(f)
+                        key = hashlib.sha256(pwd.encode()).digest(); aeslog = AESGCM(key)
+                        try:
+                            plain = aeslog.decrypt(base64.b64decode(d['nonce']), base64.b64decode(d['ciphertext']), None)
+                            export_path = os.path.join(HISTORY_DIR, f"{self.token}_{int(time.time())}.txt")
+                            with open(export_path,'w') as f: f.write(plain.decode())
+                            log(f"Exportado: {export_path}", "ok")
+                        except: log("Falha na exportação.", "err")
                 elif raw == '/fingerprint':
                     print(Y + f"🔑 Seu fingerprint: {fingerprint(self.pub_pem)}" + R)
+                elif raw.startswith('/filter '):
+                    filtro = raw[8:].strip()
+                    if filtro == 'off':
+                        self.current_filter = None; log("Filtro removido.", "ok")
+                    else:
+                        self.current_filter = filtro; log(f"Filtrando: #{filtro}", "ok")
                 else:
                     if self.room_key:
                         msg = raw
@@ -511,6 +568,7 @@ class ChatClient:
         while self.alive: time.sleep(0.5)
         self.sio.disconnect()
         log("Chat encerrado.", "info")
+        os._exit(0)
 
 if __name__ == '__main__':
     client = ChatClient()
@@ -518,3 +576,4 @@ if __name__ == '__main__':
         client.run()
     except KeyboardInterrupt:
         print("\n" + D + "Encerrado." + R)
+        os._exit(0)
