@@ -185,25 +185,3 @@ Distribuído sob a licença MIT. Veja LICENSE para mais informações.
 Desenvolvido por PeekSecurity – Acesso rápido e simples.
 
 ---
-
----
-
-## ✅ Check antes de subir
-
-- [ ] Substitua `seu-usuario` pelo seu usuário real do GitHub
-- [ ] Adicione uma imagem/screenshot real do cliente em ação (substitua o placeholder `https://via.placeholder.com/...`)
-- [ ] Crie o arquivo `LICENSE` (MIT) no repositório
-- [ ] Teste os comandos `curl` no Termux para garantir que funcionam
-
-## 📦 Comandos para criar o repositório e subir
-
-```bash
-# No diretório do ps.chat-client
-git init
-git add .
-git commit -m "Release v1.0.0 - PS.Chat Client"
-git remote add origin https://github.com/seu-usuario/ps.chat-client.git
-git push -u origin main
-git tag -a v1.0.0 -m "Primeira versão estável do cliente"
-git push origin v1.0.0
-```
